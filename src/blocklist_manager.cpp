@@ -26,6 +26,11 @@ const uint32_t kMaxListDomains = kMaxListBytes / kHashBytes;
 const uint32_t kHeadroomBytes = 8192;
 SemaphoreHandle_t filesystemMutex = nullptr;
 
+void reportSlow(const char* operation, uint32_t started) {
+  const uint32_t elapsed = millis() - started;
+  if (elapsed >= 100) Serial.printf("[blocklist] slow %s=%lu ms\n", operation, static_cast<unsigned long>(elapsed));
+}
+
 bool expired(uint32_t deadline) { return static_cast<int32_t>(millis() - deadline) >= 0; }
 
 class BoundedTextSink final : public Stream {
@@ -79,6 +84,13 @@ bool blocklistFilesystemLock(uint32_t timeoutMs) {
 void blocklistFilesystemUnlock() {
   if (filesystemMutex) xSemaphoreGive(filesystemMutex);
 }
+
+namespace {
+bool fileExistsLocked(const char* path) {
+  BlocklistFilesystemGuard guard;
+  return guard && LittleFS.exists(path);
+}
+}  // namespace
 
 BlocklistManager blocklistManager;
 
@@ -158,7 +170,7 @@ bool BlocklistManager::persistConfig(Profile selected, Profile applied) {
 
 void BlocklistManager::loadConfig() {
   selected_ = applied_ = Profile::Custom;
-  if (!LittleFS.exists(kConfigPath)) return;
+  if (!fileExistsLocked(kConfigPath)) return;
   File f = LittleFS.open(kConfigPath, "r");
   if (!f) return;
   String selected = f.readStringUntil('\n');
@@ -199,13 +211,13 @@ bool BlocklistManager::validateFile(const char* path, uint32_t& domains, uint32_
 
 bool BlocklistManager::recoverStage() {
   String marker;
-  if (LittleFS.exists(kMarkerPath)) {
+  if (fileExistsLocked(kMarkerPath)) {
     File f = LittleFS.open(kMarkerPath, "r");
     if (f) { marker = f.readStringUntil('\n'); marker.trim(); f.close(); }
   }
   // A crash after the live rename but before the config commit leaves the
   // marker with no staging file.  Recover the applied profile from it.
-  if (!LittleFS.exists(kStagePath) && marker.length()) {
+  if (!fileExistsLocked(kStagePath) && marker.length()) {
     Profile profile;
     uint32_t domains = 0, bytes = 0;
     if (profileFromName(marker.c_str(), profile) && validateFile(kLivePath, domains, bytes)) {
@@ -216,7 +228,7 @@ bool BlocklistManager::recoverStage() {
     if (blocklistFilesystemLock(1000)) { LittleFS.remove(kMarkerPath); blocklistFilesystemUnlock(); }
     return true;
   }
-  if (!LittleFS.exists(kStagePath)) return true;
+  if (!fileExistsLocked(kStagePath)) return true;
   uint32_t domains = 0, bytes = 0;
   if (marker.length() && validateFile(kStagePath, domains, bytes)) {
     Profile profile;
@@ -246,14 +258,15 @@ bool BlocklistManager::begin() {
   if (!filesystemMutex) filesystemMutex = xSemaphoreCreateMutex();
   if (!stateMutex_) stateMutex_ = xSemaphoreCreateMutex();
   if (!filesystemMutex || !stateMutex_) { setStatus("Coordinador de listas no disponible"); return false; }
-  const bool hadConfig = LittleFS.exists(kConfigPath);
+  const bool hadConfig = fileExistsLocked(kConfigPath);
   loadConfig();
   recoverStage();
   if (blocklistFilesystemLock(1000)) {
-    live_ = LittleFS.open(kLivePath, "r");
-    if (live_) {
-      bytes_ = live_.size();
+    File reader = LittleFS.open(kLivePath, "r");
+    if (reader) {
+      bytes_ = reader.size();
       domains_ = (bytes_ > 0 && bytes_ % kHashBytes == 0) ? bytes_ / kHashBytes : 0;
+      reader.close();
     }
     blocklistFilesystemUnlock();
   }
@@ -264,21 +277,35 @@ bool BlocklistManager::begin() {
   return true;
 }
 
-bool BlocklistManager::contains(uint64_t hash) const {
-  if (!domains_) return false;
+BlocklistManager::Lookup BlocklistManager::lookup(uint64_t hash) const {
+  if (!domains_) return Lookup::NotFound;
+  // One owned stream per lookup avoids a stale stdio descriptor after list
+  // replacement. Keep its entire lifecycle isolated from staging writers.
+  const uint32_t started = millis();
+  BlocklistFilesystemGuard guard;
+  if (!guard) { reportSlow("lookup-lock", started); return Lookup::Unavailable; }
+  File reader = LittleFS.open(kLivePath, "r");
+  if (!reader) return Lookup::Unavailable;
+  Lookup result = Lookup::NotFound;
   int32_t lo = 0, hi = static_cast<int32_t>(domains_) - 1;
   uint8_t bytes[kHashBytes];
   while (lo <= hi) {
     const int32_t mid = (lo + hi) >> 1;
-    live_.seek(static_cast<uint32_t>(mid) * kHashBytes);
-    if (live_.read(bytes, kHashBytes) != kHashBytes) break;
+    if (!reader.seek(static_cast<uint32_t>(mid) * kHashBytes) ||
+        reader.read(bytes, kHashBytes) != kHashBytes) {
+      Serial.printf("[blocklist] read failed index=%ld errno=%d\n", static_cast<long>(mid), errno);
+      result = Lookup::Unavailable;
+      break;
+    }
     uint64_t value = 0;
     for (size_t i = 0; i < kHashBytes; ++i) value |= static_cast<uint64_t>(bytes[i]) << (i * 8);
     if (value < hash) lo = mid + 1;
     else if (value > hash) hi = mid - 1;
-    else return true;
+    else { result = Lookup::Found; break; }
   }
-  return false;
+  reader.close();
+  reportSlow("lookup", started);
+  return result;
 }
 
 bool BlocklistManager::startStage(Profile profile, uint32_t expectedSize, uint32_t expectedDomains,
@@ -292,7 +319,9 @@ bool BlocklistManager::startStage(Profile profile, uint32_t expectedSize, uint32
   // usedBytes traverses the filesystem and stalls concurrent DNS reads.
   // Reserve a byte budget once rather than traversing on every network chunk.
   const size_t total = LittleFS.totalBytes();
+  const uint32_t scanStarted = millis();
   const size_t used = LittleFS.usedBytes();
+  reportSlow("space-scan", scanStarted);
   const size_t free = total > used ? total - used : 0;
   stageCapacity_ = free > kHeadroomBytes ? min(static_cast<size_t>(kMaxListBytes), free - static_cast<size_t>(kHeadroomBytes)) : 0;
   if (!stageCapacity_ || (expectedSize && expectedSize > stageCapacity_)) {
@@ -323,16 +352,27 @@ bool BlocklistManager::stageWrite(const uint8_t* data, size_t length) {
     if (stageDomains_ > kMaxListDomains) stageValid_ = false;
   }
   if (!blocklistFilesystemLock(1000)) { stageValid_ = false; return false; }
+  const uint32_t writeStarted = millis();
   const size_t written = stage_.write(data, length);
   blocklistFilesystemUnlock();
+  reportSlow("stage-write", writeStarted);
   stageBytes_ += static_cast<uint32_t>(written);
   if (written != length) stageValid_ = false;
   if (stageExpectedSize_) progress_ = static_cast<uint8_t>(stageBytes_ * 90UL / stageExpectedSize_);
   return stageValid_;
 }
 
-bool BlocklistManager::finishStage() {
+bool BlocklistManager::closeStage() {
+  const uint32_t started = millis();
+  BlocklistFilesystemGuard guard;
+  if (!guard) return false;
   if (stage_) stage_.close();
+  reportSlow("stage-close", started);
+  return true;
+}
+
+bool BlocklistManager::finishStage() {
+  if (!closeStage()) return false;
   const bool ok = stageValid_ && recordLength_ == 0 && stageDomains_ > 0 &&
                   (!stageExpectedSize_ || stageBytes_ == stageExpectedSize_) &&
                   (!stageExpectedDomains_ || stageDomains_ == stageExpectedDomains_);
@@ -349,7 +389,7 @@ bool BlocklistManager::finishStage() {
     if (!markerOk) stageValid_ = false;
     blocklistFilesystemUnlock();
   }
-  if (!stageValid_ || !LittleFS.exists(kMarkerPath)) {
+  if (!stageValid_ || !fileExistsLocked(kMarkerPath)) {
     if (blocklistFilesystemLock(1000)) { LittleFS.remove(kStagePath); LittleFS.remove(kMarkerPath); blocklistFilesystemUnlock(); }
     stageValid_ = false;
     return false;
@@ -361,23 +401,26 @@ bool BlocklistManager::finishStage() {
 }
 
 bool BlocklistManager::commitStage() {
-  if (!commitPending_ || !LittleFS.exists(kStagePath)) return false;
+  if (!commitPending_ || !fileExistsLocked(kStagePath)) return false;
   if (!blocklistFilesystemLock(1000)) return false;
-  // ESP LittleFS rejects replacement of an open destination (EBUSY).
-  // Activation runs on the DNS loop, so close the reader only for this short
-  // atomic rename and reopen the surviving path even if replacement fails.
-  if (live_) live_.close();
+  // Readers are local to lookup(), so no persistent destination FD blocks
+  // LittleFS replacement. The mutex covers rename and the new file metadata.
+  const uint32_t renameStarted = millis();
   errno = 0;
   const bool renamed = LittleFS.rename(kStagePath, kLivePath);
   const int renameError = errno;
-  live_ = LittleFS.open(kLivePath, "r");
+  reportSlow("activation-rename", renameStarted);
+  File reader = LittleFS.open(kLivePath, "r");
+  const bool readable = static_cast<bool>(reader);
+  const uint32_t size = readable ? reader.size() : 0;
+  if (reader) reader.close();
   blocklistFilesystemUnlock();
-  if (!renamed || !live_) {
+  if (!renamed || !readable) {
     Serial.printf("[blocklist] activation failed rename=%d errno=%d reader=%d\n",
-                  renamed, renameError, static_cast<bool>(live_));
+                  renamed, renameError, readable);
     return false;
   }
-  bytes_ = live_.size(); domains_ = bytes_ / kHashBytes;
+  bytes_ = size; domains_ = bytes_ / kHashBytes;
   applied_ = pendingProfile_;
   selected_ = pendingProfile_;
   if (!persistConfig(selected_, applied_)) {
@@ -418,7 +461,7 @@ bool BlocklistManager::completeUpload() {
   if (!ok && !busy_) {
     // Leave a marker behind if rename already happened; boot recovery can
     // finish the config commit.  A still-staged file is safe to discard.
-    if (LittleFS.exists(kStagePath) && blocklistFilesystemLock(1000)) {
+    if (fileExistsLocked(kStagePath) && blocklistFilesystemLock(1000)) {
       LittleFS.remove(kStagePath); LittleFS.remove(kMarkerPath); blocklistFilesystemUnlock();
     }
     commitPending_ = false;
@@ -428,7 +471,7 @@ bool BlocklistManager::completeUpload() {
 void BlocklistManager::abortUpload() {
   uploading_ = false;
   commitPending_ = false;
-  if (stage_) stage_.close();
+  closeStage();
   if (blocklistFilesystemLock(1000)) { LittleFS.remove(kStagePath); LittleFS.remove(kMarkerPath); blocklistFilesystemUnlock(); }
 }
 
@@ -502,9 +545,9 @@ bool BlocklistManager::downloadAsset(const Asset& asset, Profile profile) {
   if (!startStage(profile, asset.size, asset.domains, asset.sha256)) return false;
   WiFiClientSecure client; client.setCACert(GITHUB_ROOTS); client.setTimeout(8);
   HTTPClient http; http.setConnectTimeout(8000); http.setTimeout(10000); http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); http.setRedirectLimit(5);
-  if (!http.begin(client, asset.url) || http.GET() != HTTP_CODE_OK) { http.end(); if (stage_) stage_.close(); return false; }
+  if (!http.begin(client, asset.url) || http.GET() != HTTP_CODE_OK) { http.end(); closeStage(); return false; }
   const int length = http.getSize();
-  if (length >= 0 && static_cast<uint32_t>(length) != asset.size) { http.end(); if (stage_) stage_.close(); return false; }
+  if (length >= 0 && static_cast<uint32_t>(length) != asset.size) { http.end(); closeStage(); return false; }
   mbedtls_sha256_context digest; mbedtls_sha256_init(&digest); mbedtls_sha256_starts_ret(&digest, 0);
   DownloadSink sink(*this, asset.size, millis() + 120000, &digest);
   const int copied = http.writeToStream(&sink);
@@ -521,8 +564,8 @@ bool BlocklistManager::downloadUrl(const String& url) {
   HTTPClient http; http.setConnectTimeout(8000); http.setTimeout(10000); http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); http.setRedirectLimit(5);
   const bool https = url.startsWith("https://");
   if (https) secure.setCACert(GITHUB_ROOTS);
-  if (!(https ? http.begin(secure, url) : http.begin(plain, url)) || http.GET() != HTTP_CODE_OK) { http.end(); if (stage_) stage_.close(); return false; }
-  const int length = http.getSize(); if (length > static_cast<int>(kMaxListBytes)) { http.end(); if (stage_) stage_.close(); return false; }
+  if (!(https ? http.begin(secure, url) : http.begin(plain, url)) || http.GET() != HTTP_CODE_OK) { http.end(); closeStage(); return false; }
+  const int length = http.getSize(); if (length > static_cast<int>(kMaxListBytes)) { http.end(); closeStage(); return false; }
   const size_t limit = length > 0 ? static_cast<size_t>(length) : kMaxListBytes;
   DownloadSink sink(*this, limit, millis() + 120000);
   const int copied = http.writeToStream(&sink);
@@ -563,7 +606,7 @@ void BlocklistManager::worker() {
   if (op == Operation::Profile || op == Operation::Refresh) ok = fetchProfile(selected_);
   else if (op == Operation::Url) ok = fetchUrl(requestedUrl_);
   if (!ok) {
-    if (stage_) stage_.close();
+    closeStage();
     if (blocklistFilesystemLock(1000)) { LittleFS.remove(kStagePath); LittleFS.remove(kMarkerPath); blocklistFilesystemUnlock(); }
     bool detailed = false;
     if (setStateMutex(100)) { detailed = failureStatus_.length() > 0; releaseStateMutex(); }
@@ -593,7 +636,7 @@ void BlocklistManager::poll() {
     } else if (busy_) {
       // A failed rename/config write must not leave the UI permanently busy.
       commitPending_ = false;
-      const bool unapplied = LittleFS.exists(kStagePath);
+      const bool unapplied = fileExistsLocked(kStagePath);
       if (unapplied && blocklistFilesystemLock(1000)) {
         LittleFS.remove(kStagePath); LittleFS.remove(kMarkerPath); blocklistFilesystemUnlock();
       }

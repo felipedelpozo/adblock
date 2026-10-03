@@ -97,13 +97,27 @@ def main():
             code, message = post(ip, '/lists/profile?p=' + args.profile, nonce, origin)
             assert code == 202, (code, message)
             deadline = time.monotonic() + 180
+            last_poll = 0.0
+            after = lists(ip)
             while time.monotonic() < deadline:
                 tick = time.monotonic()
-                assert resolve(ip, 'googlesyndication.com') == ['0.0.0.0'], 'DNS blocking lost during download'
+                try:
+                    answer = resolve(ip, 'googlesyndication.com')
+                    assert answer == ['0.0.0.0'], f'DNS blocking lost during download: {answer}'
+                except Exception:
+                    diagnostic = stats(ip)
+                    print('DNS failure state: ' + json.dumps({key: diagnostic[key] for key in
+                          ('blocking', 'resumeIn', 'blocked', 'allowed', 'domains', 'heap', 'upstat')}), flush=True)
+                    raise
                 samples.append((time.monotonic() - tick) * 1000)
-                after = lists(ip)
-                if not after['busy']:
-                    break
+                # Match the dashboard's 450 ms busy-state polling separately
+                # from DNS samples. Every UDP query still has to succeed.
+                if time.monotonic() - last_poll >= .45:
+                    after = lists(ip)
+                    assert after['nonce'] == nonce, 'Device rebooted during profile update'
+                    last_poll = time.monotonic()
+                    if not after['busy']:
+                        break
                 time.sleep(.1)
             assert not after['busy'], 'Profile update timed out'
             assert after['appliedProfile'] == args.profile, after['status']

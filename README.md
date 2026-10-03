@@ -8,7 +8,7 @@ An open-source **ESP32 DNS sinkhole** for network ad and tracker blocking, with
 a local web dashboard and optional round touchscreen. Run it on an ESP32-C3
 or ESP32-S3, point a device's DNS at it, and manage blocking from your browser.
 
-**[Download v0.1.1](https://github.com/felipedelpozo/adblock/releases/tag/v0.1.1)**
+**[Download v0.2.1](https://github.com/felipedelpozo/adblock/releases/tag/v0.2.1)**
 · [Setup](#getting-started) · [Hardware & pinout](#hardware-profiles)
 · [Firmware updates](#ota-and-persistent-updates) · [FAQ](#faq)
 
@@ -230,7 +230,7 @@ The HaGeZi default uses the current `wildcard/light-onlydomains.txt` path.
 A failed source or empty list stops the build and preserves the old output.
 The result is sorted unique 40-bit FNV-1a hashes, matching the original engine.
 
-Firmware 0.2.0 also offers **Ligero**, **Equilibrado** (recommended) and
+Firmware 0.2.1 also offers **Ligero**, **Equilibrado** (recommended) and
 **Estricto** directly in the dashboard. Existing installations retain their
 current list as **Personalizada** until a profile is explicitly applied.
 Allowed-domain exceptions cover subdomains and survive reboot/OTA. They
@@ -309,7 +309,7 @@ activating its inactive OTA slot. Wi-Fi, settings and LittleFS are retained.
 No releases means no installation; updates are never installed automatically.
 See [GitHub update and release instructions](docs/GITHUB_FIRMWARE_UPDATES.md)
 for the manifest contract, publishing the six release assets and CI builds.
-See the [latest v0.2.0 release validation](docs/RELEASE_VALIDATION_0.2.0.md)
+See the [latest v0.2.1 release validation](docs/RELEASE_VALIDATION_0.2.1.md)
 for published-asset checksums and the physical OTA/device evidence. The
 [pre-release GitHub and QR validation](docs/GITHUB_QR_VALIDATION.md) remains as
 historical preparation evidence; optical phone-camera QR scanning is still

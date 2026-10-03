@@ -9,6 +9,18 @@
 bool blocklistFilesystemLock(uint32_t timeoutMs);
 void blocklistFilesystemUnlock();
 
+class BlocklistFilesystemGuard {
+ public:
+  explicit BlocklistFilesystemGuard(uint32_t timeoutMs = 1000)
+      : locked_(blocklistFilesystemLock(timeoutMs)) {}
+  ~BlocklistFilesystemGuard() { if (locked_) blocklistFilesystemUnlock(); }
+  explicit operator bool() const { return locked_; }
+  BlocklistFilesystemGuard(const BlocklistFilesystemGuard&) = delete;
+  BlocklistFilesystemGuard& operator=(const BlocklistFilesystemGuard&) = delete;
+ private:
+  bool locked_;
+};
+
 class BlocklistManager {
  public:
   enum class Profile : uint8_t { Custom = 0, Light, Balanced, Strict };
@@ -16,7 +28,8 @@ class BlocklistManager {
   bool begin();
   void poll();
 
-  bool contains(uint64_t hash) const;
+  enum class Lookup : uint8_t { NotFound, Found, Unavailable };
+  Lookup lookup(uint64_t hash) const;
   uint32_t domains() const { return domains_; }
   uint32_t bytes() const { return bytes_; }
 
@@ -63,6 +76,7 @@ class BlocklistManager {
                   const String& expectedSha256);
   bool stageWrite(const uint8_t* data, size_t length);
   bool finishStage();
+  bool closeStage();
   bool validateFile(const char* path, uint32_t& domains, uint32_t& bytes) const;
   bool commitStage();
   bool recoverStage();
@@ -75,7 +89,6 @@ class BlocklistManager {
   static bool validSha256(const String& value);
   static bool canonicalAssetUrl(const String& url, Profile profile, const String& sha256);
 
-  mutable File live_;
   uint32_t domains_ = 0;
   uint32_t bytes_ = 0;
   Profile selected_ = Profile::Custom;

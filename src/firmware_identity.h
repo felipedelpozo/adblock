@@ -4,7 +4,7 @@
 #include <string.h>
 
 #ifndef ADBLOCK_FW_VERSION
-#define ADBLOCK_FW_VERSION "0.2.0"
+#define ADBLOCK_FW_VERSION "0.2.1"
 #endif
 
 namespace firmware_identity {

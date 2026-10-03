@@ -79,9 +79,8 @@ static uint64_t fnv40(const char* s, size_t n) {
   for (size_t i = 0; i < n; i++) { h ^= (uint8_t)s[i]; h *= 0x100000001b3ULL; }
   return h & HASH_MASK;
 }
-static bool inFlash(uint64_t h) { return blocklistManager.contains(h); }
 static bool inCustom(uint64_t h) { for (int i = 0; i < numCustom; i++) if (customHash[i] == h) return true; return false; }
-static bool isBlocked(const char* domain, blocked_log::Reason* reason) {
+static bool isBlocked(const char* domain, blocked_log::Reason* reason, bool* readable) {
   // An allowlist only overrides domain rules.  Client bans are checked by the
   // caller first and therefore remain enforced regardless of this table.
   if (allowlist.containsSuffix(domain)) return false;
@@ -89,7 +88,9 @@ static bool isBlocked(const char* domain, blocked_log::Reason* reason) {
   while (p && *p) {
     uint64_t h = fnv40(p, strlen(p));
     if (inCustom(h)) { *reason = blocked_log::Reason::Custom; return true; }
-    if (inFlash(h)) { *reason = blocked_log::Reason::Blocklist; return true; }
+    const BlocklistManager::Lookup result = blocklistManager.lookup(h);
+    if (result == BlocklistManager::Lookup::Unavailable) { *readable = false; return false; }
+    if (result == BlocklistManager::Lookup::Found) { *reason = blocked_log::Reason::Blocklist; return true; }
     const char* dot = strchr(p, '.'); if (!dot) break;
     const char* next = dot + 1; if (!strchr(next, '.')) break; p = next;
   }
@@ -98,6 +99,7 @@ static bool isBlocked(const char* domain, blocked_log::Reason* reason) {
 
 // ---------- persistence ----------
 static void loadCustom() {
+  BlocklistFilesystemGuard guard; if (!guard) return;
   numCustom = 0; if (!LittleFS.exists("/custom.txt")) return;
   File f = LittleFS.open("/custom.txt", "r"); if (!f) return;
   while (f.available() && numCustom < MAX_CUSTOM) {
@@ -106,7 +108,7 @@ static void loadCustom() {
   }
   f.close();
 }
-static void saveCustom() { File f = LittleFS.open("/custom.txt", "w"); if (!f) return; for (int i = 0; i < numCustom; i++) f.println(customDom[i]); f.close(); }
+static void saveCustom() { BlocklistFilesystemGuard guard; if (!guard) return; File f = LittleFS.open("/custom.txt", "w"); if (!f) return; for (int i = 0; i < numCustom; i++) f.println(customDom[i]); f.close(); }
 static bool addCustom(String d) {
   d.trim(); d.toLowerCase(); if (d.startsWith("www.")) d = d.substring(4);
   if (!d.length() || d.indexOf('.') < 0 || numCustom >= MAX_CUSTOM) return false;
@@ -122,12 +124,14 @@ static void removeCustom(String d) {
 }
 static bool isBannedIP(uint32_t ip) { for (int i = 0; i < numBanned; i++) if (bannedIP[i] == ip) return true; return false; }
 static void loadBanned() {
+  BlocklistFilesystemGuard guard; if (!guard) return;
   numBanned = 0; if (!LittleFS.exists("/banned.txt")) return;
   File f = LittleFS.open("/banned.txt", "r"); if (!f) return;
   while (f.available() && numBanned < MAX_BAN) { String l = f.readStringUntil('\n'); l.trim(); IPAddress ip; if (l.length() && ip.fromString(l)) bannedIP[numBanned++] = (uint32_t)ip; }
   f.close();
 }
 static void saveBanned() {
+  BlocklistFilesystemGuard guard; if (!guard) return;
   numBanned = 0;
   for (int i = 0; i < numClients && numBanned < MAX_BAN; i++) if (clients[i].banned) bannedIP[numBanned++] = clients[i].ip;
   File f = LittleFS.open("/banned.txt", "w"); if (!f) return;
@@ -190,9 +194,16 @@ static bool handleDns() {
     Dev* c = getClient((uint32_t)cip);
     bool ban = c && c->banned;
     blocked_log::Reason reason = blocked_log::Reason::Client;
-    bool blocked = ban || (blocking.active() && dl && (blocklistManager.domains() || numCustom) && isBlocked(domain, &reason));
+    bool readable = true;
+    bool blocked = ban || (blocking.active() && dl && (blocklistManager.domains() || numCustom) && isBlocked(domain, &reason, &readable));
     int rlen;
-    if (blocked) {
+    if (!readable) {
+      // A failed flash lookup is not permission to forward a blocked name.
+      // SERVFAIL lets the client retry without silently bypassing protection.
+      buf[2] = 0x81; buf[3] = 0x82;
+      memset(buf + 6, 0, 6);
+      rlen = qend;
+    } else if (blocked) {
       rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++;
       blocked_log::record(dl ? domain : nullptr, static_cast<uint32_t>(cip), qtype, reason);
     }
@@ -316,6 +327,7 @@ static void handleUpload() {
 
 // ---------- remote blocklist auto-update ----------
 static void loadUpdateCfg() {
+  BlocklistFilesystemGuard guard; if (!guard) return;
   if (!LittleFS.exists("/update.cfg")) return;
   File f = LittleFS.open("/update.cfg", "r"); if (!f) return;
   updateUrl = f.readStringUntil('\n'); updateUrl.trim();
@@ -325,6 +337,7 @@ static void loadUpdateCfg() {
   if (updateIntervalH < 1 || updateIntervalH > 720) updateIntervalH = 24;
 }
 static void saveUpdateCfg() {
+  BlocklistFilesystemGuard guard; if (!guard) return;
   File f = LittleFS.open("/update.cfg", "w"); if (!f) return;
   f.println(updateUrl); f.println(updateIntervalH); f.close();
 }
@@ -457,6 +470,7 @@ static void handleAllowlistRemove() {
 }
 
 static void loadAllowlist() {
+  BlocklistFilesystemGuard guard; if (!guard) return;
   allowlist.clear();
   if (!LittleFS.exists("/allowlist.txt")) return;
   File f = LittleFS.open("/allowlist.txt", "r"); if (!f) return;
@@ -692,7 +706,10 @@ void loop() {
     ArduinoOTA.handle();
     firmwareUpdateUnlock();
   }
+  const uint32_t webStarted = millis();
   web.handleClient();
+  const uint32_t webElapsed = millis() - webStarted;
+  if (webElapsed >= 100) Serial.printf("[service] slow web=%lu ms\n", static_cast<unsigned long>(webElapsed));
   bool busy = handleDns();
   if (updateUrl.length() || blocklistManager.selectedProfile() != BlocklistManager::Profile::Custom) {
     uint32_t now = millis();

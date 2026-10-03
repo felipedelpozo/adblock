@@ -1,6 +1,6 @@
 # DNS blocklist profiles and allowed domains
 
-Firmware 0.2.0 adds curated DNS profiles and persistent domain exceptions.
+Firmware 0.2.1 adds curated DNS profiles and persistent domain exceptions.
 Existing devices keep their installed list as **Custom**; upgrading firmware
 does not silently replace a user's blocklist or update settings.
 
