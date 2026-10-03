@@ -81,7 +81,7 @@ The final firmware also logs filesystem and web operations lasting at least
 100 ms to support diagnosis without recording queried domain names.
 On that final diagnostic build, PRO++ then PRO passed 210 and 191 queries
 respectively, with unchanged boot nonces. Median/p95 were 57.52/97.15 ms and
-73.23/115.85 ms. Logged lookup delays were approximately 100–112 ms, and test
+73.23/115.85 ms. Logged lookup delays were approximately 100–157 ms, and test
 web requests peaked at 228 ms; no multi-second filesystem stall was recorded.
 This successful repeat does not erase the earlier two timeout observations.
 Serial contained only the intentional USB reset and application-OTA reboot,
@@ -99,7 +99,9 @@ allowed-domain precedence and removal; rejection of unsorted, multi-file and
 empty list uploads while preserving the active list.
 
 PASS: dashboard, upstream resolution, parent-domain blocking, five/thirty-minute
-pause and resume. GitHub HTTPS release checks preserved DNS service and rejected
+pause and resume. Blocked-history verification also passed bounded retention,
+newest-first order, pagination, search and AAAA logging using a domain present
+in HaGeZi profiles. GitHub HTTPS release checks preserved DNS service and rejected
 unconfirmed installation, missing/invalid/cross-origin tokens and empty/invalid
 manual firmware uploads without reboot. This check ran on 0.2.1 while the latest
 public stable release was still 0.1.1; it did not exercise a newer-version

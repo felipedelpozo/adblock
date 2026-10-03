@@ -27,14 +27,14 @@ def main():
     assert initial['domains'] > 0
     marker = 'round-history-validation'
     for index in range(80):
-        domain = f'query{index}.{marker}.doubleclick.net'
+        domain = f'query{index}.{marker}.googlesyndication.com'
         assert resolve(ip, domain) == ['0.0.0.0'], domain
     newest = history(ip, q=marker, limit=16)
     assert newest['capacity'] == newest['total'] == 64, newest
     assert 0 < newest['count'] <= 64
     assert len(newest['entries']) == min(16, newest['count'])
     entry = newest['entries'][0]
-    assert entry['domain'] == f'query79.{marker}.doubleclick.net', entry
+    assert entry['domain'] == f'query79.{marker}.googlesyndication.com', entry
     assert entry['reason'] == 'blocklist' and entry['type'] == 1, entry
     assert entry['ageSeconds'] >= 0 and entry['client']
     if newest['more']:
@@ -47,7 +47,7 @@ def main():
     assert not history(ip, offset=999)['entries']
 
     # IPv6 sinkhole replies have no answer, but still appear as type AAAA.
-    domain = f'aaaa.{marker}.doubleclick.net'
+    domain = f'aaaa.{marker}.googlesyndication.com'
     question = b''.join(bytes([len(label)]) + label.encode() for label in domain.split('.'))
     packet = struct.pack('!HHHHHH', 12345, 0x0100, 1, 0, 0, 0) + question + b'\0\0\x1c\0\1'
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
