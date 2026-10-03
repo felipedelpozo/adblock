@@ -3,10 +3,12 @@
 #include <stdint.h>
 #include "dashboard_link.h"
 #include "touch_model.h"
+#include "wifi_qr.h"
 
 namespace round_ui {
 
 enum class Page : uint8_t { Status, Activity, Lists, Network, Controls };
+enum class QrView : uint8_t { None, Dashboard, SetupWifi };
 constexpr uint8_t kPageCount = 5;
 
 inline Page adjacentPage(Page page, int8_t direction) {
@@ -72,6 +74,7 @@ constexpr ControlRect kPause5Button = {50, 91, 140, 34};
 constexpr ControlRect kPause30Button = {50, 132, 140, 34};
 constexpr ControlRect kResumeButton = {58, 173, 124, 27};
 constexpr ControlRect kDashboardButton = {54, 181, 132, 27};
+constexpr ControlRect kSetupWifiButton = {54, 145, 132, 27};
 
 inline Action hitTest(Page page, bool blocking, bool portal, int16_t x, int16_t y) {
   if (page != Page::Controls || portal) return Action::None;
@@ -85,21 +88,37 @@ inline bool dashboardAvailable(const Snapshot& snapshot) {
   return (snapshot.connected || snapshot.portal) && validDashboardIp(snapshot.ip);
 }
 
+inline bool setupWifiAvailable(const Snapshot& snapshot) {
+  char payload[kSetupWifiPayloadCapacity];
+  return setupWifiPayload(snapshot.portal, snapshot.ap, payload, sizeof(payload));
+}
+
 class Navigation {
  public:
   Page page = Page::Status;
-  bool qrVisible = false;
+  QrView qrView = QrView::None;
 
   void reconcile(const Snapshot& snapshot) {
-    if (!dashboardAvailable(snapshot)) qrVisible = false;
+    const bool setupAvailable = setupWifiAvailable(snapshot);
+    if (setupAvailable && !wasSetupAvailable) {
+      page = Page::Network;
+      qrView = QrView::SetupWifi;
+    }
+    wasSetupAvailable = setupAvailable;
+    if ((qrView == QrView::Dashboard && !dashboardAvailable(snapshot)) ||
+        (qrView == QrView::SetupWifi && !setupAvailable))
+      qrView = QrView::None;
   }
 
   Action handle(const Gesture& gesture, const Snapshot& snapshot, bool pageReady) {
     if (gesture.kind == GestureKind::None) return Action::None;
-    if (qrVisible) {
-      // Dismissal consumes the complete gesture; it cannot also change pages
-      // or activate a pause button behind the modal.
-      qrVisible = false;
+    if (qrView != QrView::None) {
+      // QR gestures are consumed here. A ready Wi-Fi QR advances to the
+      // portal URL on tap; dismissing cannot also activate a hidden control.
+      if (gesture.kind == GestureKind::Tap && !pageReady) return Action::None;
+      qrView = gesture.kind == GestureKind::Tap && qrView == QrView::SetupWifi &&
+                       dashboardAvailable(snapshot)
+                   ? QrView::Dashboard : QrView::None;
       return Action::None;
     }
     if (gesture.kind == GestureKind::SwipeLeft || gesture.kind == GestureKind::SwipeRight) {
@@ -107,10 +126,16 @@ class Navigation {
       return Action::None;
     }
     if (!pageReady) return Action::None;
+    if (page == Page::Network && setupWifiAvailable(snapshot) &&
+        kSetupWifiButton.contains(gesture.startX, gesture.startY) &&
+        kSetupWifiButton.contains(gesture.x, gesture.y)) {
+      qrView = QrView::SetupWifi;
+      return Action::None;
+    }
     if (page == Page::Network && dashboardAvailable(snapshot) &&
         kDashboardButton.contains(gesture.startX, gesture.startY) &&
         kDashboardButton.contains(gesture.x, gesture.y)) {
-      qrVisible = true;
+      qrView = QrView::Dashboard;
       return Action::None;
     }
     const Action start = hitTest(page, snapshot.blocking, snapshot.portal,
@@ -118,6 +143,9 @@ class Navigation {
     const Action end = hitTest(page, snapshot.blocking, snapshot.portal, gesture.x, gesture.y);
     return start == end ? start : Action::None;
   }
+
+ private:
+  bool wasSetupAvailable = false;
 };
 
 }  // namespace round_ui

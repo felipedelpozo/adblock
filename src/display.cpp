@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include "display_qr.h"
+#include "i18n.h"
 
 #if defined(ROUND_DISPLAY_S3)
 #include "st77916_qspi.h"
@@ -72,8 +73,8 @@ round_ui::Snapshot current;
 round_ui::Snapshot paint;
 round_ui::Page currentPage = round_ui::Page::Status;
 round_ui::Page paintPage = round_ui::Page::Status;
-bool currentQr = false;
-bool paintQr = false;
+round_ui::QrView currentQr = round_ui::QrView::None;
+round_ui::QrView paintQr = round_ui::QrView::None;
 bool activeChanged = false;
 bool pageReadyFlag = false;
 uint8_t dirtyRegions = kAllRegions;
@@ -85,6 +86,8 @@ int32_t clipTop = 0;
 int32_t clipBottom = 240;
 uint32_t maxRenderUs = 0;
 uint32_t renderCount = 0;
+bool languageInitialized = false;
+bool renderedEnglish = false;
 
 bool sameSnapshot(const round_ui::Snapshot& a, const round_ui::Snapshot& b) {
   return a.blocking == b.blocking && a.connected == b.connected && a.portal == b.portal &&
@@ -180,7 +183,8 @@ void formatCompact(uint32_t value, char* output, size_t capacity) {
   if (value < 1000U) {
     std::snprintf(output, capacity, "%lu", static_cast<unsigned long>(value));
   } else if (value < 10000U) {
-    std::snprintf(output, capacity, "%lu.%luK", static_cast<unsigned long>(value / 1000U),
+    std::snprintf(output, capacity, "%lu%c%luK", static_cast<unsigned long>(value / 1000U),
+                  i18n::english() ? '.' : ',',
                   static_cast<unsigned long>((value % 1000U) / 100U));
   } else if (value < 1000000U) {
     std::snprintf(output, capacity, "%luK", static_cast<unsigned long>(value / 1000U));
@@ -197,7 +201,8 @@ void formatCount(uint32_t value, char* output, size_t capacity) {
   if (value < 1000U) {
     std::snprintf(output, capacity, "%lu", static_cast<unsigned long>(value));
   } else if (value < 1000000U) {
-    std::snprintf(output, capacity, "%lu.%03lu", static_cast<unsigned long>(value / 1000U),
+    std::snprintf(output, capacity, "%lu%c%03lu", static_cast<unsigned long>(value / 1000U),
+                  i18n::english() ? ',' : '.',
                   static_cast<unsigned long>(value % 1000U));
   } else {
     formatCompact(value, output, capacity);
@@ -213,7 +218,8 @@ void formatCountdown(uint32_t seconds, char* output, size_t capacity) {
 
 void formatPercentTenths(uint16_t tenths, char* output, size_t capacity) {
   const uint16_t bounded = tenths > 1000U ? 1000U : tenths;
-  std::snprintf(output, capacity, "%u,%u%%", static_cast<unsigned>(bounded / 10U),
+  std::snprintf(output, capacity, "%u%c%u%%", static_cast<unsigned>(bounded / 10U),
+                i18n::english() ? '.' : ',',
                 static_cast<unsigned>(bounded % 10U));
 }
 
@@ -247,6 +253,10 @@ void drawPageTitle(const char* title) {
   textCentered(title, 120, 22, kMuted, 1);
 }
 
+const char* tr(const char* englishText, const char* spanishText) {
+  return i18n::text(englishText, spanishText);
+}
+
 void drawDots() {
   constexpr int32_t kFirstDot = 104;
   for (uint8_t index = 0; index < 5; ++index) {
@@ -261,42 +271,45 @@ void drawDots() {
 }
 
 void drawStatusPage() {
-  drawPageTitle("ESTADO");
+  drawPageTitle(tr("STATUS", "ESTADO"));
   const bool paused = !paint.blocking && !paint.portal;
   const uint16_t accent = paint.portal ? kAmber : (paused ? kCoral : kTeal);
   drawShield(110, 63, accent);
 
   if (paint.portal) {
-    textCentered("CONFIGURA WIFI", 120, 106, kAmber, 2);
-    textCentered("PORTAL ACTIVO", 120, 146, kMuted, 1);
+    textCentered(tr("CONFIGURE WIFI", "CONFIGURA WIFI"), 120, 106, kAmber, 2);
+    textCentered(tr("PORTAL ACTIVE", "PORTAL ACTIVO"), 120, 146, kMuted, 1);
   } else {
-    textCentered(paused ? "PAUSADO" : "ACTIVO", 120, 106, accent, 4);
-    textCentered(paused ? "BLOQUEO EN PAUSA" : "PROTECCION ACTIVA", 120, 146, kMuted, 1);
+    textCentered(paused ? tr("PAUSED", "PAUSADO") : tr("ACTIVE", "ACTIVO"), 120, 106, accent, 4);
+    textCentered(paused ? tr("BLOCKING PAUSED", "BLOQUEO EN PAUSA")
+                       : tr("PROTECTION ACTIVE", "PROTECCION ACTIVA"),
+                 120, 146, kMuted, 1);
     if (paused) {
       if (paint.resumeSeconds == 0) {
-        textCentered("PAUSA SIN LIMITE", 120, 173, kInk, 1);
+        textCentered(tr("PAUSED INDEFINITELY", "PAUSA SIN LIMITE"), 120, 173, kInk, 1);
       } else {
         char countdown[12];
         formatCountdown(paint.resumeSeconds, countdown, sizeof(countdown));
         char detail[24];
-        std::snprintf(detail, sizeof(detail), "REANUDA EN %s", countdown);
+        std::snprintf(detail, sizeof(detail), "%s %s",
+                      tr("RESUMES IN", "REANUDA EN"), countdown);
         textCentered(detail, 120, 173, kInk, 1);
       }
     } else if (!paint.connected) {
-      textCentered("SIN CONEXION WIFI", 120, 173, kCoral, 1);
+      textCentered(tr("WIFI OFFLINE", "SIN CONEXION WIFI"), 120, 173, kCoral, 1);
     }
   }
 }
 
 void drawActivityPage() {
-  drawPageTitle("ACTIVIDAD");
+  drawPageTitle(tr("ACTIVITY", "ACTIVIDAD"));
   const uint16_t tenths = round_ui::blockedPercentTenths(paint.blocked, paint.allowed);
   char percentage[12];
   formatPercentTenths(tenths, percentage, sizeof(percentage));
   // At 100%, the extra digit needs a smaller C3 font to stay inside the circle.
   const uint8_t rateSize = round_ui::pins::kPanelSize >= 360 ? 7 : (tenths == 1000 ? 5 : 6);
   textCentered(percentage, 120, 65, kInk, rateSize);
-  textCentered("CONSULTAS BLOQUEADAS", 120, 120, kMuted, 1);
+  textCentered(tr("BLOCKED REQUESTS", "CONSULTAS BLOQUEADAS"), 120, 120, kMuted, 1);
 
   char blocked[16];
   char allowed[16];
@@ -304,23 +317,24 @@ void drawActivityPage() {
   formatCount(paint.allowed, allowed, sizeof(allowed));
   textCentered(blocked, 75, 145, kCoral, 2);
   textCentered(allowed, 165, 145, kTeal, 2);
-  textCentered("BLOQUEADAS", 75, 173, kMuted, 1);
-  textCentered("PERMITIDAS", 165, 173, kMuted, 1);
-  textCentered("DESDE EL ARRANQUE", 120, 197, kMuted, 1);
+  textCentered(tr("BLOCKED", "BLOQUEADAS"), 75, 173, kMuted, 1);
+  textCentered(tr("ALLOWED", "PERMITIDAS"), 165, 173, kMuted, 1);
+  textCentered(tr("SINCE BOOT", "DESDE EL ARRANQUE"), 120, 197, kMuted, 1);
 }
 
 void drawListsPage() {
-  drawPageTitle("LISTAS");
+  drawPageTitle(tr("LISTS", "LISTAS"));
   drawListIcon(111, 63, kMuted);
   char loaded[16];
   formatCount(paint.domains, loaded, sizeof(loaded));
   textCentered(loaded, 120, 100, kInk, 4);
-  textCentered("DOMINIOS CARGADOS", 120, 142, kMuted, 1);
+  textCentered(tr("LOADED DOMAINS", "DOMINIOS CARGADOS"), 120, 142, kMuted, 1);
 
   char custom[16];
   formatCount(paint.customDomains, custom, sizeof(custom));
   char detail[32];
-  std::snprintf(detail, sizeof(detail), "%s PERSONALIZADOS", custom);
+  std::snprintf(detail, sizeof(detail), "%s %s", custom,
+                tr("CUSTOM", "PERSONALIZADOS"));
   textCentered(detail, 120, 176, kMuted, 1);
 }
 
@@ -330,70 +344,87 @@ void drawControlButton(int32_t x, int32_t y, int32_t width, int32_t height, cons
 void drawDashboardButton() {
   const auto& bounds = round_ui::kDashboardButton;
   drawControlButton(bounds.x, bounds.y, bounds.width, bounds.height,
-                    "ABRIR DASHBOARD", false, round_ui::dashboardAvailable(paint), kTeal);
+                    paint.portal ? tr("OPEN PORTAL", "ABRIR PORTAL")
+                                 : tr("OPEN DASHBOARD", "ABRIR DASHBOARD"), false,
+                    round_ui::dashboardAvailable(paint), kTeal);
 }
 
 void drawNetworkPage() {
-  drawPageTitle("RED");
+  drawPageTitle(tr("NETWORK", "RED"));
   const uint16_t accent = paint.portal ? kAmber : (paint.connected ? kTeal : kCoral);
   drawNetworkIcon(120, 50, accent);
 
   if (paint.portal) {
-    textCentered("PORTAL WIFI", 120, 78, kAmber, 1);
+    textCentered(tr("WIFI PORTAL", "PORTAL WIFI"), 120, 78, kAmber, 1);
     char portalIp[24];
     std::snprintf(portalIp, sizeof(portalIp), "%s", paint.ip[0] ? paint.ip : "192.168.4.1");
     textCentered(portalIp, 120, 101, kInk, 2);
-    textCentered("AP", 120, 139, kAmber, 1);
-    textCentered(paint.ap[0] ? paint.ap : "C3-ADBLOCK", 120, 150, kInk, 1);
+    textCentered(paint.ap[0] ? paint.ap : "C3-ADBLOCK", 120, 126, kInk, 1);
+    const auto& bounds = round_ui::kSetupWifiButton;
+    drawControlButton(bounds.x, bounds.y, bounds.width, bounds.height,
+                      tr("CONNECT WIFI", "CONECTAR WIFI"), false,
+                      round_ui::setupWifiAvailable(paint), kAmber);
     drawDashboardButton();
     return;
   } else if (paint.connected) {
-    textCentered("WIFI CONECTADO", 120, 78, kTeal, 1);
-    textCentered(paint.ip[0] ? paint.ip : "SIN IP", 120, 101, kInk, 2);
+    textCentered(tr("WIFI CONNECTED", "WIFI CONECTADO"), 120, 78, kTeal, 1);
+    textCentered(paint.ip[0] ? paint.ip : tr("NO IP", "SIN IP"), 120, 101, kInk, 2);
   } else {
-    textCentered("SIN CONEXION", 120, 78, kCoral, 1);
-    textCentered("SIN IP", 120, 101, kMuted, 2);
+    textCentered(tr("NO CONNECTION", "SIN CONEXION"), 120, 78, kCoral, 1);
+    textCentered(tr("NO IP", "SIN IP"), 120, 101, kMuted, 2);
   }
 
   char clients[16];
   std::snprintf(clients, sizeof(clients), "%u", static_cast<unsigned>(paint.clients));
   textCentered(clients, 72, 137, paint.connected ? kInk : kMuted, 2);
-  textCentered("CLIENTES DNS", 72, 164, kMuted, 1);
+  textCentered(tr("DNS CLIENTS", "CLIENTES DNS"), 72, 164, kMuted, 1);
 
   char rssi[20];
   if (paint.connected) {
     std::snprintf(rssi, sizeof(rssi), "%ld", static_cast<long>(paint.rssi));
     textCentered(rssi, 168, 137, kInk, 2);
-    textCentered("SENAL dBm", 168, 164, kMuted, 1);
+    textCentered(tr("SIGNAL dBm", "SENAL dBm"), 168, 164, kMuted, 1);
   } else {
     textCentered("--", 168, 137, kMuted, 2);
-    textCentered("SENAL dBm", 168, 164, kMuted, 1);
+    textCentered(tr("SIGNAL dBm", "SENAL dBm"), 168, 164, kMuted, 1);
   }
   drawDashboardButton();
 }
 
 void drawDashboardQr() {
-  drawPageTitle(paint.portal ? "PORTAL WIFI" : "DASHBOARD");
+  const bool setupWifi = paintQr == round_ui::QrView::SetupWifi;
+  drawPageTitle(setupWifi ? tr("1. CONNECT WIFI", "1. CONECTAR WIFI") :
+                paint.portal ? tr("2. OPEN PORTAL", "2. ABRIR PORTAL")
+                             : tr("DASHBOARD", "DASHBOARD"));
   if (!round_ui::display_qr::available()) {
-    textCentered("QR NO DISPONIBLE", 120, 106, kMuted, 1);
+    textCentered(tr("QR UNAVAILABLE", "QR NO DISPONIBLE"), 120, 106, kMuted, 1);
   } else {
     using namespace round_ui::display_qr;
-    constexpr int side = (kSize + 2 * kQuietZone) * kModulePixels;
+    const int matrixSize = size();
+    const int side = (matrixSize + 2 * kQuietZone) * kModulePixels;
+    const int left = (240 - side) / 2;
+    const int top = setupWifi ? 38 : kTop;
     // The four-module quiet zone is white even on the dark display theme.
-    fillRect(kLeft, kTop, side, side, 0xffff);
-    for (int y = 0; y < kSize; ++y) {
-      const int top = kTop + (y + kQuietZone) * kModulePixels;
-      if (!intersects(top, kModulePixels)) continue;
-      for (int x = 0; x < kSize; ++x) {
-        if (dark(x, y)) fillRect(kLeft + (x + kQuietZone) * kModulePixels,
-                                top, kModulePixels, kModulePixels, 0x0000);
+    fillRect(left, top, side, side, 0xffff);
+    for (int y = 0; y < matrixSize; ++y) {
+      const int rowTop = top + (y + kQuietZone) * kModulePixels;
+      if (!intersects(rowTop, kModulePixels)) continue;
+      for (int x = 0; x < matrixSize; ++x) {
+        if (dark(x, y)) fillRect(left + (x + kQuietZone) * kModulePixels,
+                                rowTop, kModulePixels, kModulePixels, 0x0000);
       }
     }
   }
+  if (setupWifi) {
+    textCentered(paint.ap, 120, 190, kInk, 1);
+    textCentered(tr("SCAN TO CONNECT", "ESCANEA Y CONECTA"), 120, 203, kMuted, 1);
+    textCentered(tr("TAP: PORTAL", "TOCA: PORTAL"), 120, 216, kMuted, 1);
+    return;
+  }
   textCentered(paint.ip, 120, 183, kInk, 1);
   // Keep both hints inside the narrow lower edge of the round 360px panel.
-  textCentered("USA LA MISMA WIFI", 120, 199, kMuted, 1);
-  textCentered("TOCA O DESLIZA", 120, 215, kMuted, 1);
+  textCentered(tr("USE THE SAME WIFI", "USA LA MISMA WIFI"), 120, 199, kMuted, 1);
+  textCentered(tr("TAP OR SWIPE", "TOCA O DESLIZA"), 120, 215, kMuted, 1);
 }
 
 void drawControlButton(int32_t x, int32_t y, int32_t width, int32_t height, const char* label,
@@ -407,50 +438,52 @@ void drawControlButton(int32_t x, int32_t y, int32_t width, int32_t height, cons
 }
 
 void drawControlsPage() {
-  drawPageTitle("CONTROLES");
+  drawPageTitle(tr("CONTROLS", "CONTROLES"));
   const bool paused = !paint.blocking && !paint.portal;
   const bool enabled = !paint.portal;
   if (paint.portal) {
-    textCentered("CONFIGURA WIFI", 120, 55, kAmber, 1);
+    textCentered(tr("CONFIGURE WIFI", "CONFIGURA WIFI"), 120, 55, kAmber, 1);
   } else if (paused) {
     if (paint.resumeSeconds == 0) {
-      textCentered("PAUSADO", 120, 55, kCoral, 1);
+      textCentered(tr("PAUSED", "PAUSADO"), 120, 55, kCoral, 1);
     } else {
       char countdown[12];
       formatCountdown(paint.resumeSeconds, countdown, sizeof(countdown));
       char state[24];
-      std::snprintf(state, sizeof(state), "PAUSADO %s", countdown);
+      std::snprintf(state, sizeof(state), "%s %s", tr("PAUSED", "PAUSADO"), countdown);
       textCentered(state, 120, 55, kCoral, 1);
     }
   } else {
-    textCentered("PROTECCION ACTIVA", 120, 55, kTeal, 1);
+    textCentered(tr("PROTECTION ACTIVE", "PROTECCION ACTIVA"), 120, 55, kTeal, 1);
   }
 
   // These bounds come from the shared touch contract. Keeping the renderer
   // tied to the same constants prevents visual and touch geometry drift.
   drawControlButton(round_ui::kPause5Button.x, round_ui::kPause5Button.y,
                     round_ui::kPause5Button.width, round_ui::kPause5Button.height,
-                    "PAUSAR 5 MIN", false, enabled, kTeal);
+                    tr("PAUSE 5 MIN", "PAUSAR 5 MIN"), false, enabled, kTeal);
   drawControlButton(round_ui::kPause30Button.x, round_ui::kPause30Button.y,
                     round_ui::kPause30Button.width, round_ui::kPause30Button.height,
-                    "PAUSAR 30 MIN", false, enabled, kTeal);
+                    tr("PAUSE 30 MIN", "PAUSAR 30 MIN"), false, enabled, kTeal);
   if (paused) {
     drawControlButton(round_ui::kResumeButton.x, round_ui::kResumeButton.y,
                       round_ui::kResumeButton.width, round_ui::kResumeButton.height,
-                      "REANUDAR", true, true, kTeal);
+                      tr("RESUME", "REANUDAR"), true, true, kTeal);
   } else {
     // Clear the conditional control in case the previous frozen snapshot was
     // paused. The current stripe clip makes this a local, incremental erase.
     fillRoundRect(round_ui::kResumeButton.x, round_ui::kResumeButton.y,
                   round_ui::kResumeButton.width, round_ui::kResumeButton.height, 8,
                   kBackground);
-    textCentered(paint.portal ? "ABRE EL PORTAL" : "REANUDA AUTOMATICAMENTE", 120, 182, kMuted, 1);
+    textCentered(paint.portal ? tr("OPEN THE PORTAL", "ABRE EL PORTAL")
+                             : tr("RESUME AUTOMATICALLY", "REANUDA AUTOMATICAMENTE"),
+                 120, 182, kMuted, 1);
   }
 }
 
 void drawCurrentPage() {
   fillRect(0, 0, 240, 240, kBackground);
-  if (paintQr) {
+  if (paintQr != round_ui::QrView::None) {
     drawDashboardQr();
     return;
   }
@@ -489,7 +522,7 @@ bool begin() {
   paint = current;
   currentPage = round_ui::Page::Status;
   paintPage = currentPage;
-  currentQr = paintQr = false;
+  currentQr = paintQr = round_ui::QrView::None;
   pageReadyFlag = false;
   dirtyRegions = kAllRegions;
   initialPendingRegions = kAllRegions;
@@ -497,6 +530,8 @@ bool begin() {
   nextRegion = 0;
   maxRenderUs = 0;
   renderCount = 0;
+  languageInitialized = true;
+  renderedEnglish = i18n::english();
   return true;
 }
 
@@ -516,11 +551,11 @@ void setPage(round_ui::Page page) {
 
 bool pageReady() { return pageReadyFlag; }
 
-void setDashboardQr(bool visible) {
-  visible = visible && currentPage == round_ui::Page::Network;
-  if (currentQr == visible) return;
-  currentQr = visible;
-  if (visible) display_qr::prepare(current);
+void setQrView(QrView view) {
+  if (currentPage != round_ui::Page::Network) view = QrView::None;
+  if (currentQr == view) return;
+  currentQr = view;
+  if (view != QrView::None) display_qr::prepare(current, view);
   activeRegion = -1;
   activeChanged = false;
   nextRegion = 0;
@@ -549,9 +584,9 @@ void setSnapshot(const round_ui::Snapshot& snapshot) {
 
   current = snapshot;
 
-  if (currentQr) {
+  if (currentQr != QrView::None) {
     if (networkIdentityChanged) {
-      display_qr::prepare(current);
+      display_qr::prepare(current, currentQr);
       activeRegion = -1;
       nextRegion = 0;
       dirtyRegions = initialPendingRegions = kAllRegions;
@@ -591,6 +626,22 @@ void setSnapshot(const round_ui::Snapshot& snapshot) {
 }
 
 bool renderOneRegion(uint32_t now) {
+  // Language changes are intentionally handled by the same bounded stripe
+  // renderer as ordinary state changes.  This keeps the selected page and QR
+  // modal intact while replacing every visible label without a framebuffer
+  // sized operation.
+  const bool english = i18n::english();
+  if (!languageInitialized || renderedEnglish != english) {
+    languageInitialized = true;
+    renderedEnglish = english;
+    activeRegion = -1;
+    activeChanged = false;
+    nextRegion = 0;
+    sliceY = 0;
+    dirtyRegions = kAllRegions;
+    initialPendingRegions = kAllRegions;
+    pageReadyFlag = false;
+  }
   if (!dirtyRegions) return false;
   if (activeRegion < 0) {
     activeRegion = selectNextRegion();
@@ -644,7 +695,7 @@ uint32_t maxRenderMicros() { return maxRenderUs; }
 namespace round_ui::display {
 bool begin() { return false; }
 void setPage(round_ui::Page) {}
-void setDashboardQr(bool) {}
+void setQrView(QrView) {}
 bool pageReady() { return false; }
 void setSnapshot(const Snapshot&) {}
 bool renderOneRegion(uint32_t) { return false; }

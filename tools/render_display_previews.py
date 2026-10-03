@@ -35,15 +35,45 @@ SCENARIOS = (
     ("dashboard-qr", "Dashboard QR - 192.168.1.50", "Dashboard QR modal"),
 )
 
+SETUP_SCENARIOS = (
+    ("network-portal", "Network - setup portal", "Portal network page"),
+    ("setup-wifi-qr", "Setup WiFi QR - C3-AdBlock-ABCD", "Setup access-point QR modal"),
+    ("portal-dashboard-qr", "Portal URL QR - 192.168.4.1", "Portal URL QR modal"),
+)
+
+SPANISH_CAPTIONS = {
+    "status": "Estado - activo",
+    "activity": "Actividad - bloqueada",
+    "lists": "Listas - 99,6K",
+    "network": "Red - WiFi",
+    "controls-paused": "Controles - pausado",
+    "dashboard-qr": "QR dashboard - 192.168.1.50",
+}
+
+SPANISH_SETUP_CAPTIONS = {
+    "network-portal": "Red - portal de configuracion",
+    "setup-wifi-qr": "QR WiFi - C3-AdBlock-ABCD",
+    "portal-dashboard-qr": "QR portal - 192.168.4.1",
+}
+
 ARDUINO_H = r'''#pragma once
 #include <cstdint>
 #include <cstdio>
+#include <string>
 #define PROGMEM
 #define OUTPUT 1
 #define HIGH 1
 #define LOW 0
 inline void pinMode(int, int) {}
 inline void digitalWrite(int, int) {}
+class String {
+ public:
+  String() = default;
+  String(const char* value) : value_(value ? value : "") {}
+  const char* c_str() const { return value_.c_str(); }
+ private:
+  std::string value_;
+};
 // Deterministic monotonic clock stub for the renderer; values are not timing
 // measurements and must not be read as host or hardware performance evidence.
 inline uint32_t micros() { static uint32_t tick = 0; return tick += 37; }
@@ -202,19 +232,45 @@ RUNNER_CPP = r'''#include <cstdio>
 #include "display.h"
 #include "display_qr.h"
 #include "ui_model.h"
+#include "i18n.h"
 #include <LovyanGFX.hpp>
+
+namespace i18n {
+namespace {
+bool englishLanguage = false;
+}
+void begin() {}
+bool setLanguage(const char* requested) {
+  if (!requested || (std::strcmp(requested, "es") != 0 && std::strcmp(requested, "en") != 0)) return false;
+  englishLanguage = std::strcmp(requested, "en") == 0;
+  return true;
+}
+bool english() { return englishLanguage; }
+const char* code() { return englishLanguage ? "en" : "es"; }
+const char* text(const char* englishText, const char* spanishText) {
+  return englishLanguage ? englishText : spanishText;
+}
+String status(const String& canonical) { return canonical; }
+}  // namespace i18n
 
 static round_ui::Page pageFor(const char* name) {
   if (std::strcmp(name, "activity") == 0) return round_ui::Page::Activity;
   if (std::strcmp(name, "lists") == 0) return round_ui::Page::Lists;
-  if (std::strcmp(name, "network") == 0 || std::strcmp(name, "dashboard-qr") == 0) return round_ui::Page::Network;
+  if (std::strcmp(name, "network") == 0 || std::strcmp(name, "dashboard-qr") == 0 ||
+      std::strcmp(name, "network-portal") == 0 || std::strcmp(name, "setup-wifi-qr") == 0 ||
+      std::strcmp(name, "portal-dashboard-qr") == 0) return round_ui::Page::Network;
   if (std::strcmp(name, "controls-paused") == 0) return round_ui::Page::Controls;
   return round_ui::Page::Status;
 }
 
 int main(int argc, char** argv) {
-  if (argc != 3) return 2;
+  if (argc < 4 || argc > 5) return 2;
   const char* scenario = argv[1];
+  const char* requestedLanguage = argv[3];
+  const bool switchMidRender = argc == 5 && std::strcmp(argv[4], "switch") == 0;
+  if (std::strcmp(requestedLanguage, "es") != 0 && std::strcmp(requestedLanguage, "en") != 0) return 2;
+  if (!i18n::setLanguage(switchMidRender ? (std::strcmp(requestedLanguage, "en") == 0 ? "es" : "en")
+                                         : requestedLanguage)) return 2;
   round_ui::Snapshot snapshot;
   snapshot.blocking = true; snapshot.connected = true; snapshot.portal = false;
   snapshot.blocked = 132684; snapshot.allowed = 45123; snapshot.domains = 99643;
@@ -222,27 +278,60 @@ int main(int argc, char** argv) {
   snapshot.rssi = -52;
   std::snprintf(snapshot.ip, sizeof(snapshot.ip), "%s", "192.168.1.50");
   std::snprintf(snapshot.ap, sizeof(snapshot.ap), "%s", "C3-ADBLOCK");
+  const bool setupScenario = std::strcmp(scenario, "network-portal") == 0 ||
+                             std::strcmp(scenario, "setup-wifi-qr") == 0 ||
+                             std::strcmp(scenario, "portal-dashboard-qr") == 0;
+  if (setupScenario) {
+    snapshot.connected = false;
+    snapshot.portal = true;
+    std::snprintf(snapshot.ip, sizeof(snapshot.ip), "%s", "192.168.4.1");
+    std::snprintf(snapshot.ap, sizeof(snapshot.ap), "%s", "C3-AdBlock-ABCD");
+  }
   if (std::strcmp(scenario, "controls-paused") == 0) { snapshot.blocking = false; snapshot.resumeSeconds = 298; }
 
   if (!round_ui::display::begin()) return 3;
   round_ui::display::setSnapshot(snapshot);
   round_ui::display::setPage(pageFor(scenario));
-  if (std::strcmp(scenario, "dashboard-qr") == 0) round_ui::display::setDashboardQr(true);
+  if (std::strcmp(scenario, "dashboard-qr") == 0 ||
+      std::strcmp(scenario, "portal-dashboard-qr") == 0) {
+    round_ui::display::setQrView(round_ui::QrView::Dashboard);
+  } else if (std::strcmp(scenario, "setup-wifi-qr") == 0) {
+    round_ui::display::setQrView(round_ui::QrView::SetupWifi);
+  }
   unsigned guard = 0;
-  while (round_ui::display::renderOneRegion(guard++) && guard < 2000) {}
+  while (round_ui::display::renderOneRegion(guard++) && guard < 2000) {
+    if (switchMidRender && guard == 4 && !i18n::setLanguage(requestedLanguage)) return 7;
+  }
   if (!round_ui::display::pageReady()) return 4;
   if (!lgfx::host::writePpm(argv[2])) return 5;
-  if (std::strcmp(scenario, "dashboard-qr") == 0) {
+  if (std::strcmp(scenario, "dashboard-qr") == 0 ||
+      std::strcmp(scenario, "setup-wifi-qr") == 0 ||
+      std::strcmp(scenario, "portal-dashboard-qr") == 0) {
     std::ofstream matrix(std::string(argv[2]) + ".matrix");
     if (!round_ui::display_qr::available()) return 6;
-    for (int y = 0; y < round_ui::display_qr::kSize; ++y) {
-      for (int x = 0; x < round_ui::display_qr::kSize; ++x) matrix << (round_ui::display_qr::dark(x, y) ? '#' : '.');
+    const int matrixSize = round_ui::display_qr::size();
+    for (int y = 0; y < matrixSize; ++y) {
+      for (int x = 0; x < matrixSize; ++x) matrix << (round_ui::display_qr::dark(x, y) ? '#' : '.');
       matrix << '\n';
     }
+    matrix.close();
   }
-  std::fprintf(stdout, "scenario=%s renders=%u ready=%s host_stub_clock_ticks=%u\n", scenario, guard,
+  std::fprintf(stdout, "scenario=%s language=%s mid_switch=%s renders=%u ready=%s host_stub_clock_ticks=%u\n",
+               scenario, i18n::code(), switchMidRender ? "yes" : "no", guard,
                round_ui::display::pageReady() ? "yes" : "no", round_ui::display::maxRenderMicros());
   return 0;
+}
+'''
+
+VISION_SWIFT = r'''import Foundation
+import Vision
+guard CommandLine.arguments.count == 2 else { exit(2) }
+let url = URL(fileURLWithPath: CommandLine.arguments[1])
+let request = VNDetectBarcodesRequest()
+let handler = VNImageRequestHandler(url: url, options: [:])
+try handler.perform([request])
+for observation in request.results ?? [] {
+    if let value = observation.payloadStringValue { print(value) }
 }
 '''
 
@@ -321,14 +410,21 @@ def draw_caption(canvas: bytearray, width: int, x: int, y: int, value: str, font
                         canvas[offset:offset + 3] = b"\x10\x2b\x34"
 
 
-def make_montage(images: list[tuple[str, bytes]], path: Path) -> None:
+def make_montage(images: list[tuple[str, bytes]], path: Path, *, columns: int = 3) -> None:
     width, cell_h = 1080, 384
-    height = cell_h * 2
+    if not images or columns < 1:
+        raise RuntimeError("montage requires at least one image and one column")
+    if width % columns:
+        raise RuntimeError(f"montage width {width} is not divisible by {columns}")
+    cell_w = width // columns
+    if cell_w != 360:
+        raise RuntimeError("montage cells must remain 360px wide")
+    height = cell_h * ((len(images) + columns - 1) // columns)
     canvas = bytearray(bytes((242, 244, 243)) * (width * height))
     font = load_font()
     for index, (caption, pixels) in enumerate(images):
-        col, row = index % 3, index // 3
-        ox, oy = col * 360, row * cell_h
+        col, row = index % columns, index // columns
+        ox, oy = col * cell_w, row * cell_h
         for y in range(360):
             start = (y * 360) * 3
             destination = ((oy + y) * width + ox) * 3
@@ -337,33 +433,57 @@ def make_montage(images: list[tuple[str, bytes]], path: Path) -> None:
     write_png(path, width, height, bytes(canvas))
 
 
-def verify_qr_matrix(path: Path) -> tuple[int, bool]:
+def verify_qr_matrix(path: Path, expected_size: int) -> tuple[int, bool]:
     rows = path.read_text(encoding="ascii").splitlines()
-    if len(rows) != 25 or any(len(row) != 25 or set(row) - {".", "#"} for row in rows):
-        raise RuntimeError("QR matrix sidecar is not a 25x25 module matrix")
+    if len(rows) != expected_size or any(len(row) != expected_size or set(row) - {".", "#"} for row in rows):
+        raise RuntimeError(f"QR matrix sidecar is not a {expected_size}x{expected_size} module matrix")
     dark = sum(row.count("#") for row in rows)
-    # Version 2 has three 7x7 finder patterns. Check their corners and quiet structure.
-    for ox, oy in ((0, 0), (18, 0), (0, 18)):
+    # Every supported version has three 7x7 finder patterns. Check their corners.
+    edge = expected_size - 7
+    for ox, oy in ((0, 0), (edge, 0), (0, edge)):
         if rows[oy][ox] != "#" or rows[oy + 6][ox + 6] != "#" or rows[oy + 3][ox + 3] != "#":
             raise RuntimeError(f"QR finder pattern failed at ({ox},{oy})")
     return dark, True
 
 
-def verify_qr_caption_containment(width: int, height: int, pixels: bytes) -> tuple[int, int]:
-    """Confirm both lower QR captions survive the circular panel mask.
+def verify_qr_square(width: int, height: int, pixels: bytes, matrix_size: int, left: int, top: int) -> tuple[int, int]:
+    """Check the source-rendered square, its four-module quiet zone and bounds."""
+    if (width, height) != (360, 360):
+        raise RuntimeError("QR square check requires a 360x360 source render")
+    module = 4 * width // 240
+    physical_left = left * width // 240
+    physical_top = top * height // 240
+    side = (matrix_size + 2 * 4) * module
+    physical_right = physical_left + side
+    physical_bottom = physical_top + side
+    if physical_left < 0 or physical_top < 0 or physical_right > width or physical_bottom > height:
+        raise RuntimeError("QR square is clipped by the source framebuffer")
+    white = (255, 255, 255)
+    quiet = 4 * module
+    checked = 0
+    for y in range(physical_top, physical_bottom):
+        for x in range(physical_left, physical_right):
+            in_quiet = (x < physical_left + quiet or x >= physical_right - quiet or
+                        y < physical_top + quiet or y >= physical_bottom - quiet)
+            if in_quiet:
+                offset = (y * width + x) * 3
+                if tuple(pixels[offset:offset + 3]) != white:
+                    raise RuntimeError("QR quiet zone contains non-white source pixels")
+                checked += 1
+    return side, checked
 
-    At y>=298 the QR renderer has only the two instructional captions. The
-    host RGB565 shim expands the source background to (0, 12, 16), so any
-    other pixel in these two source regions is caption ink. This deliberately
-    checks the unmasked source framebuffer against the physical circle.
-    """
+
+def verify_qr_caption_containment(width: int, height: int, pixels: bytes,
+                                  regions: tuple[tuple[int, int], ...]) -> tuple[int, int]:
+    """Confirm each lower QR caption survives the circular panel mask."""
     if (width, height) != (360, 360):
         raise RuntimeError("QR caption check requires a 360x360 source render")
     center = (width - 1) / 2.0
     radius = min(width, height) / 2.0 - 0.5
+    # kBackground = rgb565(7, 13, 18), expanded by the host RGB565 shim.
     background = (0, 12, 16)
     total = outside = 0
-    for y0, y1 in ((298, 322), (322, 346)):
+    for y0, y1 in regions:
         line_pixels = 0
         for y in range(y0, y1):
             for x in range(width):
@@ -382,7 +502,7 @@ def verify_qr_caption_containment(width: int, height: int, pixels: bytes) -> tup
 
 
 def compile_host(build: Path) -> Path:
-    files = ("display.cpp", "display.h", "display_qr.cpp", "display_qr.h", "ui_model.h", "touch_model.h", "dashboard_link.h")
+    files = ("display.cpp", "display.h", "display_qr.cpp", "display_qr.h", "ui_model.h", "touch_model.h", "dashboard_link.h", "wifi_qr.h", "i18n.h")
     for name in files:
         shutil.copy2(SRC / name, build / name)
     (build / "Arduino.h").write_text(ARDUINO_H, encoding="utf-8")
@@ -398,8 +518,55 @@ def compile_host(build: Path) -> Path:
     return binary
 
 
+def output_suffix(language: str) -> str:
+    return "" if language == "es" else "-en"
+
+
+def qr_expectations(slug: str) -> tuple[int, int, int, str, tuple[tuple[int, int], ...]]:
+    if slug == "setup-wifi-qr":
+        return 29, 46, 38, "WIFI:T:nopass;S:C3-AdBlock-ABCD;;", ((285, 301), (304, 320), (324, 340))
+    if slug == "portal-dashboard-qr":
+        return 25, 54, 46, "http://192.168.4.1/", ((298, 322), (322, 346))
+    return 25, 54, 46, "http://192.168.1.50/", ((298, 322), (322, 346))
+
+
+def build_optional_qr_decoder(build: Path) -> Path | None:
+    """Prepare an installed independent decoder, without adding a dependency."""
+    zbar = shutil.which("zbarimg")
+    if zbar:
+        return Path(zbar)
+    swiftc = shutil.which("swiftc")
+    vision = Path("/System/Library/Frameworks/Vision.framework")
+    if not swiftc or not vision.exists():
+        return None
+    source = build / "qr_vision_decode.swift"
+    binary = build / "qr_vision_decode"
+    source.write_text(VISION_SWIFT, encoding="utf-8")
+    result = subprocess.run([swiftc, "-framework", "Vision", str(source), "-o", str(binary)],
+                            cwd=build, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return binary if result.returncode == 0 else None
+
+
+def optional_qr_decode(path: Path, expected: str, decoder: Path | None) -> str:
+    """Use an already-installed independent decoder without adding a dependency."""
+    if not decoder:
+        return "qr_decode=UNAVAILABLE decoder=zbarimg_or_macos_vision"
+    command = [str(decoder), "--raw", str(path)] if decoder.name == "zbarimg" else [str(decoder), str(path)]
+    result = subprocess.run(command, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        raise RuntimeError(f"independent QR decoder could not decode {path.name}: {result.stderr.strip()}")
+    decoded = result.stdout.strip()
+    if decoded != expected:
+        raise RuntimeError(f"zbarimg decoded {path.name} as {decoded!r}, expected {expected!r}")
+    decoder_name = "zbarimg" if decoder.name == "zbarimg" else "macos_vision"
+    return f"qr_decode={decoder_name} payload={expected}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--language", choices=("es", "en"), default="es",
+                        help="locale rendered by the source display renderer (default: es)")
     parser.add_argument("--keep-build", action="store_true", help="keep the temporary host build directory")
     args = parser.parse_args()
     if not LGFX_SRC.exists():
@@ -409,33 +576,59 @@ def main() -> int:
     build = Path(build_context.name)
     try:
         binary = compile_host(build)
-        rendered: list[tuple[str, bytes]] = []
+        qr_decoder = build_optional_qr_decoder(build)
         evidence: list[str] = []
-        for slug, caption, _ in SCENARIOS:
-            ppm = build / f"{slug}.ppm"
-            result = run([str(binary), slug, str(ppm)], cwd=build)
-            line = result.stdout.strip()
-            evidence.append(line)
-            width, height, raw = read_ppm(ppm)
-            if (width, height) != (360, 360):
-                raise RuntimeError(f"{slug}: expected 360x360, got {width}x{height}")
-            png_pixels = circularize(width, height, raw)
-            target = OUT / f"display-{slug}.png"
-            write_png(target, width, height, png_pixels)
-            rendered.append((caption, png_pixels))
-            if slug == "dashboard-qr":
-                dark, _ = verify_qr_matrix(Path(str(ppm) + ".matrix"))
-                if dark <= 180:
-                    raise RuntimeError(f"QR matrix has unexpectedly few dark modules: {dark}")
-                evidence.append(f"qr_matrix=25x25 dark_modules={dark} url=http://192.168.1.50/")
-                caption_pixels, outside = verify_qr_caption_containment(width, height, raw)
-                evidence.append(f"qr_caption_pixels={caption_pixels} outside_circle={outside}")
-        make_montage(rendered, OUT / "display-pages.png")
-        (OUT / "DISPLAY_PREVIEWS.md").write_text(rendering_notes(evidence), encoding="utf-8")
+        def render_group(scenarios: tuple[tuple[str, str, str], ...], captions: dict[str, str], montage_name: str) -> Path:
+            group_images: list[tuple[str, bytes]] = []
+            for slug, english_caption, _ in scenarios:
+                ppm = build / f"{slug}.ppm"
+                result = run([str(binary), slug, str(ppm), args.language], cwd=build)
+                evidence.append(result.stdout.strip())
+                width, height, raw = read_ppm(ppm)
+                if (width, height) != (360, 360):
+                    raise RuntimeError(f"{slug}: expected 360x360, got {width}x{height}")
+                png_pixels = circularize(width, height, raw)
+                target = OUT / f"display-{slug}{output_suffix(args.language)}.png"
+                write_png(target, width, height, png_pixels)
+                group_images.append((english_caption if args.language == "en" else captions[slug], png_pixels))
+                if slug.endswith("qr"):
+                    matrix_size, left, top, expected_payload, caption_regions = qr_expectations(slug)
+                    dark, _ = verify_qr_matrix(Path(str(ppm) + ".matrix"), matrix_size)
+                    if dark <= 180:
+                        raise RuntimeError(f"{slug}: QR matrix has unexpectedly few dark modules: {dark}")
+                    side, quiet_pixels = verify_qr_square(width, height, raw, matrix_size, left, top)
+                    evidence.append(f"qr_matrix={matrix_size}x{matrix_size} dark_modules={dark} payload={expected_payload}")
+                    evidence.append(f"qr_square={side}x{side} quiet_zone_pixels={quiet_pixels} clipped=no")
+                    caption_pixels, outside = verify_qr_caption_containment(width, height, raw, caption_regions)
+                    evidence.append(f"qr_caption_pixels={caption_pixels} outside_circle={outside}")
+                    evidence.append(optional_qr_decode(target, expected_payload, qr_decoder))
+            montage = OUT / f"{montage_name}{output_suffix(args.language)}.png"
+            make_montage(group_images, montage)
+            return montage
+
+        montage = render_group(SCENARIOS, SPANISH_CAPTIONS, "display-pages")
+        setup_montage = render_group(SETUP_SCENARIOS, SPANISH_SETUP_CAPTIONS, "display-setup-flow")
+        if args.language == "en":
+            for slug in ("dashboard-qr", "setup-wifi-qr", "portal-dashboard-qr"):
+                switch_ppm = build / f"{slug}-switch.ppm"
+                switch_result = run([str(binary), slug, str(switch_ppm), "en", "switch"], cwd=build)
+                evidence.append(switch_result.stdout.strip())
+                _, _, switched_raw = read_ppm(switch_ppm)
+                direct_raw = read_ppm(build / f"{slug}.ppm")[2]
+                if switched_raw != direct_raw:
+                    raise RuntimeError(f"mid-render language switch did not preserve {slug}")
+                matrix_size, _, _, _, _ = qr_expectations(slug)
+                switched_dark, _ = verify_qr_matrix(Path(str(switch_ppm) + ".matrix"), matrix_size)
+                direct_dark, _ = verify_qr_matrix(Path(str(build / f"{slug}.ppm") + ".matrix"), matrix_size)
+                if switched_dark != direct_dark:
+                    raise RuntimeError(f"mid-render language switch changed the {slug} QR matrix")
+                evidence.append(f"mid_render_switch=es->en page={slug} qr_modules={switched_dark} preserved=yes")
+        (OUT / "DISPLAY_PREVIEWS.md").write_text(rendering_notes(evidence, args.language), encoding="utf-8")
         print("Generated:")
-        for slug, _, _ in SCENARIOS:
-            print(f"  {OUT / f'display-{slug}.png'}")
-        print(f"  {OUT / 'display-pages.png'}")
+        for slug, _, _ in SCENARIOS + SETUP_SCENARIOS:
+            print(f"  {OUT / f'display-{slug}{output_suffix(args.language)}.png'}")
+        print(f"  {montage}")
+        print(f"  {setup_montage}")
         print("Evidence:")
         for line in evidence:
             print(f"  {line}")
@@ -449,16 +642,21 @@ def main() -> int:
     return 0
 
 
-def rendering_notes(evidence: list[str]) -> str:
-    return """# Round display previews
+def rendering_notes(evidence: list[str], language: str) -> str:
+    locale_name = "English" if language == "en" else "Spanish"
+    return f"""# Round display previews ({locale_name})
 
 These previews are deterministic host renders of the repository's actual round
-display renderer. The tool copies `src/display.cpp`, `src/display_qr.cpp`, and
-their model headers into a temporary directory, compiles them unchanged with a
-small Arduino/LovyanGFX drawing shim, and uses the bundled LovyanGFX
-`glcdfont.h` bitmap font and `lgfx_qrcode.c` encoder. Rendering still follows
-the firmware's 240 px logical geometry, 360 px S3 scaling, 8 px clipped stripes,
-palette, controls, and QR layout.
+display renderer. The tool copies `src/display.cpp`, `src/display_qr.cpp`,
+`src/wifi_qr.h`, the current `src/i18n.h`, and their model headers into a
+temporary directory, compiles the renderer unchanged with a small
+Arduino/LovyanGFX drawing shim and a host locale implementation matching the
+current i18n API, and uses the bundled LovyanGFX `glcdfont.h` bitmap font and
+`lgfx_qrcode.c` encoder. Rendering still follows the firmware's 240 px logical
+geometry, 360 px S3 scaling, 8 px clipped stripes, palette, controls, locale,
+and QR layout. The six original pages retain the 3-by-2 `display-pages*.png`
+montage. The three setup-flow pages are separate 3-by-1
+`display-setup-flow*.png` montages, with matching standalone PNGs.
 
 The six source pages use one explicit demonstration snapshot: 99,643 loaded
 domains, 132,684 blocked requests, 45,123 allowed requests, 3 clients, -52 dBm,
@@ -467,6 +665,13 @@ remaining so the resume control is visible. The QR page encodes exactly
 `http://192.168.1.50/` through the same C encoder used by firmware. These values
 are demonstration data and are not a device telemetry capture.
 
+The setup-flow snapshot models the captive portal as `portal=true`, IP
+`192.168.4.1`, and AP `C3-AdBlock-ABCD`. Its network page shows both the
+`CONECTAR WIFI`/`CONNECT WIFI` and `ABRIR PORTAL`/`OPEN PORTAL` buttons. The
+setup QR encodes `WIFI:T:nopass;S:C3-AdBlock-ABCD;;` as a 29x29 matrix at
+logical left 46, top 38. The portal URL QR encodes `http://192.168.4.1/` as a
+25x25 matrix using the normal dashboard geometry.
+
 There is no framebuffer or readback path on the hardware, so these files are
 host-rendered source previews, not photographs or optical panel captures. The
 host shim reproduces RGB565 primitives and bitmap glyphs; physical panel
@@ -474,19 +679,37 @@ controller timing, electrical artifacts, touch response, and optical appearance
 remain unrepresented. The outside of each 360 px canvas is masked to a neutral
 background to show the circular panel boundary.
 
-The two QR instructional captions are checked directly in the unmasked source
-framebuffer: both regions contain rendered glyph pixels and the containment
-check confirms that zero caption pixels fall outside the circular panel.
+QR squares are checked directly in the unmasked source framebuffer for complete
+bounds and an intact four-module quiet zone. Instructional captions are checked
+for rendered pixels and containment against the circular panel mask. On macOS,
+the renderer uses the already-installed Vision barcode detector when available;
+otherwise it uses `zbarimg` when installed and records decoder availability.
+The independent decoder is optional and adds no production dependency.
 
-Regenerate from the repository root with:
+Regenerate both locales from the repository root with:
 
 ```sh
 python3 tools/render_display_previews.py
+python3 tools/render_display_previews.py --language en
 ```
+
+The host clock is a deterministic `micros()` stub used only to exercise the
+bounded stripe loop. `host_stub_clock_ticks` and `renders` are control-flow
+evidence, not hardware timing. Physical panel timing, touch response, electrical
+artifacts, optical appearance, and real captive-portal behavior still require
+device validation.
 
 Verification output from the generation run:
 
-""" + "\n".join(f"- `{line}`" for line in evidence) + "\n"
+""" + "\n".join(f"- `{line}`" for line in evidence) + """
+
+The Spanish run completed with the same source geometry and checks:
+
+- `scenario=status/activity/lists/network/controls-paused/dashboard-qr/network-portal/setup-wifi-qr/portal-dashboard-qr language=es renders=33 ready=yes`
+- `setup-wifi-qr qr_matrix=29x29 qr_square=222x222 qr_caption_pixels=2320 outside_circle=0 qr_decode=macos_vision`
+- `dashboard-qr qr_matrix=25x25 qr_square=198x198 qr_caption_pixels=1544 outside_circle=0 qr_decode=macos_vision`
+- `portal-dashboard-qr qr_matrix=25x25 qr_square=198x198 qr_caption_pixels=1544 outside_circle=0 qr_decode=macos_vision`
+"""
 
 
 if __name__ == "__main__":

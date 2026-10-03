@@ -196,33 +196,33 @@ void test_qr_modal_open_dismiss_and_offline_behaviour() {
   navigation.page = Page::Network;
   const Gesture tap = dashboardTap();
   navigation.handle(tap, snapshot, false);
-  TEST_ASSERT_FALSE(navigation.qrVisible);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::None), static_cast<int>(navigation.qrView));
   TEST_ASSERT_EQUAL_INT(static_cast<int>(Action::None),
                         static_cast<int>(navigation.handle(tap, snapshot, true)));
-  TEST_ASSERT_TRUE(navigation.qrVisible);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::Dashboard), static_cast<int>(navigation.qrView));
   Gesture swipe; swipe.kind = GestureKind::SwipeLeft;
   navigation.handle(swipe, snapshot, true);
-  TEST_ASSERT_FALSE(navigation.qrVisible);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::None), static_cast<int>(navigation.qrView));
   TEST_ASSERT_EQUAL_INT(static_cast<int>(Page::Network), static_cast<int>(navigation.page));
   navigation.handle(tap, snapshot, true);
-  TEST_ASSERT_TRUE(navigation.qrVisible);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::Dashboard), static_cast<int>(navigation.qrView));
   TEST_ASSERT_EQUAL_INT(static_cast<int>(Action::None),
                         static_cast<int>(navigation.handle(tap, snapshot, true)));
-  TEST_ASSERT_FALSE(navigation.qrVisible);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::None), static_cast<int>(navigation.qrView));
   navigation.handle(tap, snapshot, true);
   snapshot.connected = false;
   navigation.reconcile(snapshot);
-  TEST_ASSERT_FALSE(navigation.qrVisible);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::None), static_cast<int>(navigation.qrView));
   navigation.handle(tap, snapshot, true);
-  TEST_ASSERT_FALSE(navigation.qrVisible);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::None), static_cast<int>(navigation.qrView));
   snapshot.portal = true;
   navigation.handle(tap, snapshot, true);
-  TEST_ASSERT_TRUE(navigation.qrVisible);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::Dashboard), static_cast<int>(navigation.qrView));
   navigation.page = Page::Network;
-  navigation.qrVisible = false;
+  navigation.qrView = QrView::None;
   Gesture cross = tap; cross.startY = 150;
   navigation.handle(cross, snapshot, true);
-  TEST_ASSERT_FALSE(navigation.qrVisible);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::None), static_cast<int>(navigation.qrView));
 }
 
 void test_qr_gesture_cannot_trigger_controls() {
@@ -230,14 +230,56 @@ void test_qr_gesture_cannot_trigger_controls() {
   Snapshot paused; paused.blocking = false;
   Navigation navigation;
   navigation.page = Page::Controls;
-  navigation.qrVisible = true;
+  navigation.qrView = QrView::Dashboard;
   TEST_ASSERT_EQUAL_INT(static_cast<int>(Action::None),
                         static_cast<int>(navigation.handle(dashboardTap(), paused, true)));
-  TEST_ASSERT_FALSE(navigation.qrVisible);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::None), static_cast<int>(navigation.qrView));
   navigation.page = Page::Network;
   Gesture swipe; swipe.kind = GestureKind::SwipeLeft;
   navigation.handle(swipe, paused, true);
   TEST_ASSERT_EQUAL_INT(static_cast<int>(Page::Controls), static_cast<int>(navigation.page));
+}
+
+void test_setup_wifi_qr_opens_once_then_advances_to_portal() {
+  using namespace round_ui;
+  Snapshot setup;
+  setup.portal = true;
+  std::strcpy(setup.ap, "C3-AdBlock-ABCD");
+  std::strcpy(setup.ip, "192.168.4.1");
+  Navigation navigation;
+  Snapshot pending = setup; pending.ap[0] = '\0';
+  navigation.reconcile(pending);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::None), static_cast<int>(navigation.qrView));
+  navigation.reconcile(setup);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(Page::Network), static_cast<int>(navigation.page));
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::SetupWifi), static_cast<int>(navigation.qrView));
+  navigation.handle(dashboardTap(), setup, false);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::SetupWifi), static_cast<int>(navigation.qrView));
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(Action::None),
+                        static_cast<int>(navigation.handle(dashboardTap(), setup, true)));
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::Dashboard), static_cast<int>(navigation.qrView));
+  navigation.handle(dashboardTap(), setup, true);
+  navigation.reconcile(setup);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::None), static_cast<int>(navigation.qrView));
+
+  Gesture wifiTap = dashboardTap(); wifiTap.startY = wifiTap.y = 155;
+  navigation.handle(wifiTap, setup, true);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::SetupWifi), static_cast<int>(navigation.qrView));
+  Gesture swipe; swipe.kind = GestureKind::SwipeLeft;
+  navigation.handle(swipe, setup, true);
+  navigation.reconcile(setup);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::None), static_cast<int>(navigation.qrView));
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(Page::Network), static_cast<int>(navigation.page));
+  navigation.handle(wifiTap, setup, true);
+  setup.portal = false;
+  setup.connected = true;
+  navigation.reconcile(setup);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::None), static_cast<int>(navigation.qrView));
+  navigation.handle(wifiTap, setup, true);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::None), static_cast<int>(navigation.qrView));
+  setup.portal = true;
+  navigation.reconcile(setup);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(QrView::SetupWifi), static_cast<int>(navigation.qrView));
 }
 
 int main() {
@@ -256,5 +298,6 @@ int main() {
   RUN_TEST(test_dashboard_url_requires_a_local_address_and_network);
   RUN_TEST(test_qr_modal_open_dismiss_and_offline_behaviour);
   RUN_TEST(test_qr_gesture_cannot_trigger_controls);
+  RUN_TEST(test_setup_wifi_qr_opens_once_then_advances_to_portal);
   return UNITY_END();
 }

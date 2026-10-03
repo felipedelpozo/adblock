@@ -11,8 +11,6 @@
 #include <WebServer.h>
 #include <Update.h>            // firmware OTA
 #include <ArduinoOTA.h>        // network firmware flashing (pio run over wifi)
-#include <DNSServer.h>         // captive-portal catch-all DNS
-#include <Preferences.h>       // NVS store for provisioned WiFi creds
 #include "lwip/etharp.h"
 #include "lwip/netif.h"
 #if __has_include("secrets.h")
@@ -29,6 +27,9 @@ static const char* WIFI_PASS = "";
 #include "github_updater.h"
 #include "blocklist_manager.h"
 #include "domain_rules.h"
+#include "wifi_setup.h"
+#include "i18n.h"
+#include "i18n_model.h"
 
 // ---- config ----
 static const IPAddress UPSTREAM(9, 9, 9, 9);     // Quad9
@@ -64,11 +65,6 @@ uint32_t updateIntervalH = 24;      // hours between auto-fetches
 uint32_t lastCheckMs = 0;
 String updateStatus = "never";
 String githubCsrfNonce;
-
-// WiFi provisioning (captive portal)
-Preferences prefs;
-DNSServer   dnsPortal;
-String      portalOpts;             // <option> list of scanned networks, built once at portal start
 
 // blocking pause (Pi-hole-style "disable for a while")
 BlockingState blocking;
@@ -229,14 +225,15 @@ static String jesc(const String& s) {
 static void handleStats() {
   uint32_t up = millis() / 1000;
   char ut[24]; snprintf(ut, sizeof(ut), "%lud %luh %lum", up/86400, (up%86400)/3600, (up%3600)/60);
-  const String listStatus = blocklistManager.status();
+  const String listStatus = i18n::status(blocklistManager.status());
   String j = "{\"ip\":\"" + WiFi.localIP().toString() + "\",\"blocked\":" + totalBlocked + ",\"allowed\":" + totalAllowed +
              ",\"domains\":" + blocklistManager.domains() + ",\"rssi\":" + WiFi.RSSI() + ",\"temp\":" + String(temperatureRead(), 1) +
-             ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
+             ",\"wifiSsid\":\"" + jesc(WiFi.SSID()) + "\",\"wifiSetupAp\":\"" + jesc(wifi_setup::accessPointName()) + "\"" +
+             ",\"language\":\"" + i18n::code() + "\",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
              ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(listStatus) + "\"" +
              ",\"blocking\":" + (blocking.active() ? "true" : "false") +
              ",\"fwVersion\":\"" + jesc(String(firmware_identity::VERSION)) + "\",\"fwProfile\":\"" + firmware_identity::PROFILE +
-             "\",\"githubStatus\":\"" + jesc(githubUpdater.status()) + "\",\"githubVersion\":\"" + jesc(githubUpdater.availableVersion()) +
+             "\",\"githubStatus\":\"" + jesc(i18n::status(githubUpdater.status())) + "\",\"githubVersion\":\"" + jesc(githubUpdater.availableVersion()) +
              "\",\"githubBusy\":" + String(githubUpdater.busy() ? "true" : "false") +
              ",\"githubCanInstall\":" + String(githubUpdater.canInstall() ? "true" : "false") +
              ",\"githubProgress\":" + githubUpdater.progress() + ",\"githubNonce\":\"" + githubCsrfNonce + "\"" +
@@ -257,8 +254,8 @@ static void handleBan() {
 static void handleLists() {
   String j = "{\"selectedProfile\":\"" + blocklistManager.selectedName() +
              "\",\"appliedProfile\":\"" + blocklistManager.appliedName() +
-             "\",\"busy\":" + String(blocklistManager.busy() ? "true" : "false") +
-             ",\"status\":\"" + jesc(blocklistManager.status()) +
+             "\",\"language\":\"" + i18n::code() + "\",\"busy\":" + String(blocklistManager.busy() ? "true" : "false") +
+             ",\"status\":\"" + jesc(i18n::status(blocklistManager.status())) +
              "\",\"progress\":" + String(blocklistManager.progress()) +
              ",\"nonce\":\"" + jesc(githubCsrfNonce) + "\",\"allowed\":[";
   for (size_t i = 0; i < allowlist.size(); ++i) {
@@ -429,6 +426,19 @@ static bool authorizeGithubRequest() {
   return true;
 }
 
+static void handleLanguage() {
+  if (!authorizeGithubRequest()) return;
+  const String requested = web.arg("lang");
+  i18n_model::Language selected;
+  if (!i18n_model::parse(requested.c_str(), selected)) {
+    web.send(400, "text/plain", "unsupported language"); return;
+  }
+  if (!i18n::setLanguage(requested.c_str())) {
+    web.send(500, "text/plain", "could not save language"); return;
+  }
+  web.send(200, "application/json", String("{\"language\":\"") + i18n::code() + "\"}");
+}
+
 static void loadAllowlist();
 static bool saveAllowlist();
 
@@ -563,67 +573,22 @@ static void serviceRoundUi(bool portal = false, const char* ap = "") {
 #endif
 }
 
-// ---------- WiFi provisioning (captive portal) ----------
-// Try provisioned NVS creds first, then the compile-time secrets.h creds as a
-// fallback (so the maintainer's own device + source builders keep working). If
-// neither connects, fall through to the config portal.
-static bool connectWiFi() {
-  prefs.begin("wifi", true);
-  String ss = prefs.getString("ssid", "");
-  String pw = prefs.getString("pass", "");
-  prefs.end();
-  const char* ssid = ss.length() ? ss.c_str() : WIFI_SSID;
-  const char* pass = ss.length() ? pw.c_str() : WIFI_PASS;
-  if (!ssid || !*ssid || strcmp(ssid, "YOUR_WIFI_SSID") == 0) return false;  // unconfigured
-  Serial.printf("WiFi: connecting to \"%s\"%s\n", ssid, ss.length() ? " (provisioned)" : " (secrets.h)");
-  WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.begin(ssid, pass);
-  uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) { serviceRoundUi(); delay(10); }
-  Serial.println();
-  return WiFi.status() == WL_CONNECTED;
-}
-
-static void handlePortalRoot() {
-  String html =
-    "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>C3 AdBlock setup</title>"
-    "<body style='font:16px system-ui,sans-serif;max-width:420px;margin:36px auto;padding:0 16px;background:#0d1117;color:#c9d1d9'>"
-    "<h2>&#128737; C3 AdBlock &mdash; WiFi setup</h2>"
-    "<p style='color:#8b949e'>Pick your network and enter its password. The device restarts and joins it.</p>"
-    "<form method=POST action=/wifisave>"
-    "<input list=nets name=s placeholder='WiFi name' required style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
-    "<datalist id=nets>" + portalOpts + "</datalist>"
-    "<input name=p type=password placeholder='Password' style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
-    "<button style='width:100%;padding:12px;margin-top:8px;border-radius:6px;border:0;background:#3fb950;color:#000;font-weight:600;cursor:pointer'>Connect</button>"
-    "</form></body>";
-  web.send(200, "text/html", html);
-}
-static void handleWifiSave() {
-  String ss = web.arg("s"), pw = web.arg("p");
-  if (!ss.length()) { web.send(400, "text/plain", "missing WiFi name"); return; }
-  prefs.begin("wifi", false); prefs.putString("ssid", ss); prefs.putString("pass", pw); prefs.end();
-  web.send(200, "text/html", "<!doctype html><meta charset=utf-8><body style='font:16px system-ui;text-align:center;margin-top:60px'>"
-                             "&#9989; Saved. Restarting and joining <b>" + ss + "</b>&hellip;<br><br>"
-                             "Reconnect your phone to your normal WiFi, then find the box at <b>c3adblock.local</b>.</body>");
-  delay(900); ESP.restart();
-}
-// Never returns — blocks in the portal loop until creds are saved (then reboots).
-static void startConfigPortal() {
-  int n = WiFi.scanNetworks();                 // scan while still in STA mode (no APSTA)
-  portalOpts = "";
-  for (int i = 0; i < n && i < 15; i++) portalOpts += "<option value='" + jesc(WiFi.SSID(i)) + "'>";
-  uint8_t mac[6]; WiFi.macAddress(mac);
-  char ap[24]; snprintf(ap, sizeof(ap), "C3-AdBlock-%02X%02X", mac[4], mac[5]);
-  WiFi.mode(WIFI_AP); WiFi.softAP(ap);
-  IPAddress apIP = WiFi.softAPIP();
-  dnsPortal.start(53, "*", apIP);              // catch-all -> phones pop the captive portal
-  web.on("/", handlePortalRoot);
-  web.on("/wifisave", HTTP_POST, handleWifiSave);
-  web.onNotFound(handlePortalRoot);            // any captive-portal probe -> the form
-  web.begin();
-  Serial.printf("\n[setup] No WiFi. Join open network \"%s\" and a setup page pops up (or http://%s)\n",
-                ap, apIP.toString().c_str());
-  while (true) { dnsPortal.processNextRequest(); web.handleClient(); serviceRoundUi(true, ap); delay(2); }
+// ---------- Wi-Fi reconfiguration ----------
+static void handleWifiSetup() {
+  if (!authorizeGithubRequest()) return;
+  if (blocklistManager.busy() || githubUpdater.busy() || !firmwareUpdateTryLock(0)) {
+    web.send(409, "text/plain", "wait for list or firmware operation"); return;
+  }
+  if (!wifi_setup::requestSetup()) {
+    firmwareUpdateUnlock();
+    web.send(500, "text/plain", "could not schedule Wi-Fi setup"); return;
+  }
+  web.send(202, "application/json", "{\"ap\":\"" + jesc(wifi_setup::accessPointName()) +
+           "\",\"url\":\"http://192.168.4.1\"}");
+  Serial.println("[wifi] setup requested; saved credentials preserved");
+  // Keep OTA excluded until restart; only the one-shot setup flag was changed.
+  delay(350);
+  ESP.restart();
 }
 
 void setup() {
@@ -634,7 +599,9 @@ void setup() {
   Serial.printf("[firmware] %s\n", firmware_identity::MARKER);
   // Never auto-format: an incompatible/missing filesystem must preserve user data.
   if (!LittleFS.begin(false)) Serial.println("[fs] mount failed; data preserved (no format)");
+  i18n::begin();
   round_ui::begin();
+  wifi_setup::begin(WIFI_SSID, WIFI_PASS);
   blocklistManager.begin();
   loadCustom(); loadAllowlist(); loadBanned(); loadUpdateCfg();
   Serial.printf("blocklist: %u domains\n", blocklistManager.domains());
@@ -642,13 +609,14 @@ void setup() {
 
   // BOOT requests the portal without erasing previously saved credentials.
   pinMode(BOOT_PIN, INPUT_PULLUP);
-  bool forcePortal = false;
+  bool forcePortal = wifi_setup::consumeSetupRequest();
   if (digitalRead(BOOT_PIN) == LOW) { delay(60);
     if (digitalRead(BOOT_PIN) == LOW) {
       forcePortal = true;
       Serial.println("[setup] BOOT held -> portal (saved WiFi preserved)"); } }
 
-  if (forcePortal || !connectWiFi()) startConfigPortal();
+  if (forcePortal || !wifi_setup::connect([]() { serviceRoundUi(); }))
+    wifi_setup::runPortal(web, serviceRoundUi);
   Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
   if (MDNS.begin("c3adblock")) { MDNS.addService("http", "tcp", 80); Serial.println("dashboard: http://c3adblock.local"); }
 
@@ -670,13 +638,16 @@ void setup() {
     web.send(200, "text/plain", "paused");
   });
   web.on("/resume", []() { blocking.resume(); web.send(200, "text/plain", "resumed"); });
-  web.on("/forgetwifi", []() { web.send(200, "text/plain", "cleared — rebooting into setup portal");
-    prefs.begin("wifi", false); prefs.clear(); prefs.end(); delay(500); ESP.restart(); });
+  web.on("/wifi/setup", HTTP_POST, handleWifiSetup);
+  web.on("/language", HTTP_POST, handleLanguage);
+  web.on("/forgetwifi", HTTP_ANY, []() {
+    web.send(410, "text/plain", "Use Change Wi-Fi in the dashboard; saved credentials are preserved.");
+  });
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);      // blocklist OTA
   web.on("/update", HTTP_POST, handleFwUpdateDone, handleFwUpload);  // firmware OTA
   web.on("/github/install", HTTP_POST, handleGithubInstall);
   web.on("/github/check", HTTP_POST, handleGithubCheck);
-  web.on("/fetchnow", []() { const bool accepted = fetchBlocklist(updateUrl); web.send(accepted ? 202 : 409, "text/plain", updateStatus); });
+  web.on("/fetchnow", []() { const bool accepted = fetchBlocklist(updateUrl); web.send(accepted ? 202 : 409, "text/plain", i18n::status(updateStatus)); });
   web.on("/setupdate", []() {
     const String requestedUrl = web.hasArg("u") ? web.arg("u") : updateUrl;
     const long requestedInterval = web.hasArg("h") ? web.arg("h").toInt() : static_cast<long>(updateIntervalH);

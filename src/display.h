@@ -41,7 +41,7 @@ bool begin();
 // Select the page shown by the round display. A page change cancels the
 // current stripe and starts a complete repaint from the new page snapshot.
 void setPage(Page page);
-void setDashboardQr(bool visible);
+void setQrView(QrView view);
 bool pageReady();
 void setSnapshot(const Snapshot& snapshot);
 // Draw at most one clipped stripe. Returns true when a stripe was drawn.

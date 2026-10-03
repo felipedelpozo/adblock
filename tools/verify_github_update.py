@@ -59,7 +59,12 @@ def main():
         time.sleep(.05)
     assert result and not result['githubBusy'], 'GitHub check timed out'
     message = result['githubStatus']
-    assert message == 'No hay releases publicadas' or message.startswith(('Release lista', 'La versión instalada')), message
+    if result.get('language', 'es') == 'en':
+        assert message == 'No published releases found' or message.startswith(
+            ('Release ready to install: ', 'Installed version is up to date (')), message
+    else:
+        assert message == 'No hay releases publicadas' or message.startswith(
+            ('Release lista', 'La versión instalada')), message
     assert result['fwProfile'] == initial['fwProfile'] and result['fwVersion'] == initial['fwVersion']
     if args.reject_invalid_ota:
         assert post(ip, '/update')[0] == 400, 'An empty upload must not reboot'

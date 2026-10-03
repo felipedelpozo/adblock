@@ -33,3 +33,14 @@ remains in Git.
 
 Validation and remaining hardware/release evidence are documented in
 [GITHUB_QR_VALIDATION.md](docs/GITHUB_QR_VALIDATION.md).
+
+## Current source (0.2.4, pending a firmware release)
+
+- Add a persistent Spanish/English preference shared by the dashboard,
+  round-display pages and Wi-Fi setup portal.
+- Add dashboard Wi-Fi reconfiguration with test-before-save, cancellation and
+  recovery that preserve the saved configuration and device data.
+- Add setup-flow QR views for joining the open configuration AP and opening its
+  portal, with the portal QR kept separate from the local dashboard QR.
+- Add source-rendered Spanish/English display previews, dashboard captures and
+  provenance documentation for the current feature build.

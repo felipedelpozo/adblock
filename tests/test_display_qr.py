@@ -30,10 +30,14 @@ class DisplayQrTest(unittest.TestCase):
                         f"-I{libraries[0]}", str(ROOT / "tests/display_qr_harness.cpp"),
                         str(ROOT / "src/display_qr.cpp"), str(obj), "-o", str(cls.binary)], check=True)
 
-    def matrix(self, ip):
-        matrix = subprocess.check_output([str(self.binary), ip], text=True).splitlines()
-        self.assertEqual(len(matrix), 25)
-        self.assertTrue(all(len(row) == 25 and set(row) <= {"0", "1"} for row in matrix))
+    def matrix(self, value, setup=False):
+        command = [str(self.binary), value]
+        if setup:
+            command.append("--setup")
+        matrix = subprocess.check_output(command, text=True).splitlines()
+        side = 29 if setup else 25
+        self.assertEqual(len(matrix), side)
+        self.assertTrue(all(len(row) == side and set(row) <= {"0", "1"} for row in matrix))
         return matrix
 
     def test_station_portal_and_maximum_length_urls(self):
@@ -42,6 +46,28 @@ class DisplayQrTest(unittest.TestCase):
         longest = self.matrix("223.255.255.255")
         self.assertNotEqual(station, portal)
         self.assertNotEqual(station, longest)
+
+    def test_setup_wifi_uses_version_three_and_can_decode_when_opencv_is_available(self):
+        matrix = self.matrix("C3-AdBlock-AB12", setup=True)
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest("OpenCV decoder is optional")
+
+        side = len(matrix)
+        quiet = 4
+        scale = 8
+        image = np.full(((side + 2 * quiet) * scale,
+                         (side + 2 * quiet) * scale), 255, dtype=np.uint8)
+        for y, row in enumerate(matrix):
+            for x, module in enumerate(row):
+                if module == "1":
+                    top = (y + quiet) * scale
+                    left = (x + quiet) * scale
+                    image[top:top + scale, left:left + scale] = 0
+        decoded, _, _ = cv2.QRCodeDetector().detectAndDecode(image)
+        self.assertEqual(decoded, "WIFI:T:nopass;S:C3-AdBlock-AB12;;")
 
 
 if __name__ == "__main__":

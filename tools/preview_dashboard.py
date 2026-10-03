@@ -19,15 +19,19 @@ CLIENTS = [
 ]
 STATS = {
     "ip": "192.168.1.50", "blocked": 3120, "allowed": 12480, "domains": 227420,
+    "wifiSsid": "Example Wi-Fi", "wifiSetupAp": "C3-AdBlock-1234", "language": "es",
     "rssi": -58, "temp": 42.7, "heap": 219136, "uptime": "0d 2h 14m",
-    "upurl": "", "upiv": 24, "upstat": "never", "blocking": True,
-    "fwVersion": "0.1.1", "fwProfile": "jc3636w518c",
-    "githubStatus": "Disponible: 0.2.0", "githubVersion": "0.2.0",
-    "githubBusy": False, "githubCanInstall": True, "githubProgress": 0,
+    "upurl": "", "upiv": 24, "upstat": "Nunca comprobado", "blocking": True,
+    "fwVersion": "0.2.4", "fwProfile": "jc3636w518c",
+    # The local feature build is ahead of the public release. Keep the
+    # screenshot honest: there is no synthetic newer release to install.
+    "githubStatus": "Build local instalada: 0.2.4 · última release pública: 0.2.1", "githubVersion": "",
+    "githubBusy": False, "githubCanInstall": False, "githubProgress": 0,
     "githubNonce": "documentation-preview-not-a-device-token", "resumeIn": 0,
     "clients": CLIENTS, "custom": [],
 }
 LISTS = {
+    "language": "es",
     "selectedProfile": "balanced", "appliedProfile": "balanced", "busy": False,
     "status": "Lista verificada", "progress": 100,
     "nonce": "documentation-preview-not-a-device-token",
@@ -92,7 +96,13 @@ class PreviewHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=39417)
+    parser.add_argument("--language", choices=("es", "en"), default="es")
     args = parser.parse_args()
+    STATS["language"] = LISTS["language"] = args.language
+    if args.language == "en":
+        STATS["githubStatus"] = "Installed local build: 0.2.4 · latest public release: 0.2.1"
+        STATS["upstat"] = "Never checked"
+        LISTS["status"] = "List verified"
     server = ThreadingHTTPServer(("127.0.0.1", args.port), PreviewHandler)
     print(f"Read-only dashboard preview: http://127.0.0.1:{server.server_port}/", flush=True)
     try:

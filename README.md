@@ -8,9 +8,19 @@ An open-source **ESP32 DNS sinkhole** for network ad and tracker blocking, with
 a local web dashboard and optional round touchscreen. Run it on an ESP32-C3
 or ESP32-S3, point a device's DNS at it, and manage blocking from your browser.
 
+![AI-generated product illustration of the ESP32 ad blocker and round display](docs/images/hero-device.png)
+
+*AI-generated product illustration for orientation; it is not a physical hardware capture. See [prompt and provenance](docs/images/HERO.md).*
+
 **[Download v0.2.1](https://github.com/felipedelpozo/adblock/releases/tag/v0.2.1)**
 · [Setup](#getting-started) · [Hardware & pinout](#hardware-profiles)
 · [Firmware updates](#ota-and-persistent-updates) · [FAQ](#faq)
+· [Spanish / English](docs/LANGUAGES.md)
+
+The current source/local build is **0.2.4**. Wi-Fi reconfiguration, shared
+Spanish/English UI and setup Wi-Fi QR are available in this source build;
+they are pending a firmware release and are not included in the **v0.2.1**
+download.
 
 An adaptation of [M-Abozaid/esp32-c3-adblock](https://github.com/M-Abozaid/esp32-c3-adblock)
 (upstream `c56456ac535844d9eecd6cfee030a2e23dc797d1`). The same DNS sinkhole,
@@ -32,8 +42,13 @@ LAN; see [security and limitations](SECURITY.md).
   custom domain rules and persistent client bans.
 - **Curated blocklists:** HaGeZi Light / PRO / PRO++ profiles, verified GitHub
   list updates and persistent allowed-domain exceptions.
+- **Wi-Fi reconfiguration:** change networks from the dashboard, test before
+  saving and return to the previous network without resetting user data;
+  scan the display's setup Wi-Fi QR to connect your phone.
 - **Local dashboard:** live counters, observed clients and a searchable history
   of the last 64 blocked queries; no cloud account or external web assets.
+- **Spanish and English:** a shared saved language preference for the dashboard,
+  round display and Wi-Fi setup portal; no external translation service.
 - **Round touch UI:** five swipe pages for status, activity, lists, network and
   controls; pause for 5/30 minutes or resume, and scan a local dashboard QR.
 - **Verified GitHub OTA:** confirm a compatible release, then verify HTTPS,
@@ -52,9 +67,13 @@ LAN; see [security and limitations](SECURITY.md).
 data. See [display preview provenance](docs/images/DISPLAY_PREVIEWS.md) for the
 host-rendering method and physical-panel differences.
 
+![ESP32 setup flow: connect to Wi-Fi and open the captive portal with QR codes](docs/images/display-setup-flow.png)
+
 ### Web dashboard and blocked-query history
 
 ![ESP32 DNS ad blocker dashboard with active blocking, counters, Wi-Fi status and searchable blocked-query history](docs/images/dashboard-overview.jpg)
+
+![ESP32 DNS ad blocker dashboard in English](docs/images/dashboard-en.jpg)
 
 ### HaGeZi profiles and allowed domains
 
@@ -62,10 +81,12 @@ host-rendering method and physical-panel differences.
 
 ### Firmware updates from GitHub Releases
 
-![ESP32 GitHub OTA dashboard offering version 0.1.1 with manual upload and blocklist update controls](docs/images/dashboard-updates.jpg)
+![ESP32 GitHub OTA dashboard showing the local 0.2.4 build and public release status](docs/images/dashboard-updates.jpg)
 
 Dashboard images are browser captures of the firmware HTML served with
-synthetic data: addresses, counters and history entries are examples.
+synthesized data: addresses, counters and history entries are examples. The
+preview represents the current local 0.2.4 feature build; the latest public
+release remains v0.2.1 and no 0.2.4 release is implied.
 [Reproduce the captures](docs/images/README.md).
 
 ## Getting started
@@ -138,8 +159,9 @@ swipes navigate five circular pages, wrapping at either end:
 | Controls | Large 5-minute / 30-minute pause buttons and conditional resume |
 
 Swipe left for the next page, right for the previous page. Five dots at the
-bottom indicate position. The device starts on Status after reboot. Labels
-are in Spanish, following the approved design. Touch actions fire on release,
+bottom indicate position. The device starts on Status after reboot, or the
+setup Wi-Fi QR when provisioning. Labels follow the saved Spanish/English
+preference. Touch actions fire on release,
 on Controls and the Network dashboard button; a swipe that starts on a button
 does not press it.
 On Network, tap **ABRIR DASHBOARD** to display a QR linking to the device's
@@ -147,8 +169,15 @@ current `http://IP/` address. Scan it from a phone on the same Wi-Fi (or the
 device AP during setup). Tap or swipe once to return to Network. This gesture
 only dismisses the QR; it does not navigate or press another control. The QR
 closes if the device loses its connection and updates if its IP changes.
-The QR uses LovyanGFX's existing encoder, a 79-byte cached bit matrix and a
-four-module white quiet zone. It contains no credentials. Rendering remains
+During setup, the display automatically shows **1. CONECTAR WIFI / 1. CONNECT WIFI**.
+Scan it and accept joining the open `C3-AdBlock-XXXX` configuration network.
+Tap the display for **2. ABRIR PORTAL / 2. OPEN PORTAL**, then scan that QR to
+open `http://192.168.4.1/` if the captive portal has not opened automatically.
+A swipe dismisses the QR. The Network page also provides **CONECTAR WIFI**
+and **ABRIR PORTAL** buttons during setup.
+The Wi-Fi QR contains only the setup AP name, never saved station credentials.
+Both QR views use LovyanGFX's existing encoder, one cached packed matrix of
+at most 106 bytes and a four-module white quiet zone. Rendering remains
 incremental and uses no framebuffer.
 Pauses are deliberately volatile and start ACTIVE after a restart; they
 share the exact same state as the web controls. Existing per-client bans
@@ -171,6 +200,7 @@ modules. `src/touch_model.h` contains the allocation-free gesture recognizer;
 `src/ui_model.h` shares page order and exact button rectangles with the renderer
 and native tests. `src/display_qr.*` caches the QR matrix and
 `src/dashboard_link.h` validates and formats its local URL.
+`src/wifi_qr.h` validates and escapes the setup AP's open-network QR payload.
 `boards/jc3636w518c.json` defines the actual 16 MB/8 MB board;
 `src/st77916_qspi.*` supplies the QSPI transport absent in LovyanGFX 1.2.7. `src/blocking_state.h` handles duration limits and clock rollover.
 
@@ -230,9 +260,11 @@ The HaGeZi default uses the current `wildcard/light-onlydomains.txt` path.
 A failed source or empty list stops the build and preserves the old output.
 The result is sorted unique 40-bit FNV-1a hashes, matching the original engine.
 
-Firmware 0.2.1 also offers **Ligero**, **Equilibrado** (recommended) and
-**Estricto** directly in the dashboard. Existing installations retain their
-current list as **Personalizada** until a profile is explicitly applied.
+Firmware 0.2.1 offers **Ligero**, **Equilibrado** (recommended) and **Estricto**
+directly in the dashboard. The current source also labels these **Light**,
+**Balanced** and **Strict** when English is selected. Existing installations
+retain their current list as **Personalizada / Custom** until a profile is
+explicitly applied.
 Allowed-domain exceptions cover subdomains and survive reboot/OTA. They
 override domain blocks, while client bans remain enforced. See
 [blocklist profiles, distribution and licensing](docs/BLOCKLIST_PROFILES.md).
@@ -278,9 +310,29 @@ and untouched by this project.
 
 If no saved Wi-Fi connects, join the open AP `C3-AdBlock-XXXX` and open
 `http://192.168.4.1`. Enter the network and password in the captive portal.
-After reboot, the serial monitor reports the station IP. BOOT requests the
-portal without deleting saved credentials; `/forgetwifi` remains an explicit
-credential reset in the upstream web interface.
+After reboot, the serial monitor reports the station IP.
+
+To change networks, open **Settings → Wi-Fi and access → Change Wi-Fi** in the
+dashboard. Confirm the temporary interruption, then join the device's
+`C3-AdBlock-XXXX` network and open `http://192.168.4.1` (the portal can also be
+reached through the current LAN address while that network remains connected).
+Choose a 2.4 GHz network and enter its password. New credentials are saved only
+after a successful connection; lists, exceptions and other settings are retained.
+Cancel from the setup page to return to the saved network. An existing device
+also returns to its previous configuration after the setup idle timeout.
+
+BOOT still opens setup without deleting credentials. The old `/forgetwifi`
+credential-erasing route now returns HTTP 410 without changing anything.
+If the device receives a different IP on the new network, update the DNS
+address advertised by your router/devices; a DHCP reservation helps keep it
+stable. See [Wi-Fi reconfiguration](docs/WIFI_SETUP.md) for recovery and API details.
+
+![Wi-Fi reconfiguration panel in the dashboard, with synthetic documentation data](docs/images/dashboard-wifi.jpg)
+
+This panel is shown from the current local 0.2.4 feature build. The screenshot
+uses example network data. A new network is saved only after a successful
+connection; a change of IP also requires updating the DNS address on your
+router or clients.
 
 Open `http://c3adblock.local` or the reported IP. Point test devices/router
 DNS at that IP. Use it as the only advertised resolver when you want blocking:
@@ -302,7 +354,7 @@ observation on the device; successful initialization alone is not visual proof.
 
 The dashboard can check stable releases from
 [felipedelpozo/adblock](https://github.com/felipedelpozo/adblock). Click
-**Comprobar actualizaciones**, then **Instalar VERSION** and confirm when a
+**Check for updates**, then **Install VERSION** and confirm when a
 new compatible release is available. The device downloads it over validated
 HTTPS and checks the profile, embedded identity, size and SHA-256 before
 activating its inactive OTA slot. Wi-Fi, settings and LittleFS are retained.

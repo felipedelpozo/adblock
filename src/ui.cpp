@@ -65,41 +65,47 @@ Action poll(uint32_t now) {
   const Action action = navigation.handle(point, interactionState,
                                          sampled && display::pageReady());
   display::setPage(navigation.page);
-  display::setDashboardQr(navigation.qrVisible);
+  display::setQrView(navigation.qrView);
   if (point.kind == GestureKind::SwipeLeft || point.kind == GestureKind::SwipeRight) {
 #if defined(ROUND_DISPLAY)
     Serial.printf("[round-ui] swipe=%s page=%s qr=%s\n",
         point.kind == GestureKind::SwipeLeft ? "left" : "right", pageName(navigation.page),
-        navigation.qrVisible ? "visible" : "hidden");
+        navigation.qrView == QrView::None ? "hidden" :
+        navigation.qrView == QrView::SetupWifi ? "wifi" : "dashboard");
 #endif
     return Action::None;
   }
 #if defined(ROUND_DISPLAY)
   Serial.printf("[round-ui] tap x=%d y=%d page=%s action=%s qr=%s\n",
                 point.x, point.y, pageName(navigation.page), actionName(action),
-                navigation.qrVisible ? "visible" : "hidden");
+                navigation.qrView == QrView::None ? "hidden" :
+                navigation.qrView == QrView::SetupWifi ? "wifi" : "dashboard");
 #endif
   return action;
 }
 
 void update(const Snapshot& snapshot, uint32_t now) {
   if (!initialized) return;
+  const bool portalChanged = interactionState.portal != snapshot.portal;
   interactionState = snapshot;
   navigation.reconcile(snapshot);
-  display::setDashboardQr(navigation.qrVisible);
-  if (!sampled || refreshDue(now, lastSampleAt, kSampleIntervalMs)) {
+  display::setPage(navigation.page);
+  if (!sampled || portalChanged || refreshDue(now, lastSampleAt, kSampleIntervalMs)) {
     display::setSnapshot(snapshot);
     sampled = true;
     lastSampleAt = now;
   }
+  display::setQrView(navigation.qrView);
   // Display rendering is incremental: at most one clipped stripe is written here.
   display::renderOneRegion(now);
 #if defined(ROUND_DISPLAY)
   static uint32_t lastDiagnostic = 0;
   if (now - lastDiagnostic >= 15000) {
     lastDiagnostic = now;
-    Serial.printf("[round-ui] page=%s touch=%s render_max_us=%lu heap=%lu wifi=%s ip=%s\n",
+    Serial.printf("[round-ui] page=%s qr=%s touch=%s render_max_us=%lu heap=%lu wifi=%s ip=%s\n",
         pageName(navigation.page),
+        navigation.qrView == QrView::None ? "hidden" :
+        navigation.qrView == QrView::SetupWifi ? "wifi" : "dashboard",
         touch::ready() ? "ready" : "unavailable",
         static_cast<unsigned long>(display::maxRenderMicros()),
         static_cast<unsigned long>(ESP.getFreeHeap()),
