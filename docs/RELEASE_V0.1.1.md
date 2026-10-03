@@ -52,5 +52,6 @@ Failed checks and failed writes leave the active firmware unchanged.
 See [GitHub firmware updates](https://github.com/felipedelpozo/adblock/blob/v0.1.1/docs/GITHUB_FIRMWARE_UPDATES.md)
 and the [release checklist](https://github.com/felipedelpozo/adblock/blob/v0.1.1/docs/RELEASING.md)
 for the complete contract and installation procedure. End-to-end installation
-from the published release must be validated from a device running 0.1.0
-before it is described as complete.
+from `0.1.0` to the published release passed on the observed JC3636W518C
+device. See the [post-release validation report](https://github.com/felipedelpozo/adblock/blob/main/docs/RELEASE_VALIDATION_0.1.1.md)
+for the device evidence and remaining optical QR-scan limitation.
