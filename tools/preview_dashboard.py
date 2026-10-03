@@ -18,14 +18,20 @@ CLIENTS = [
      "allowed": 3744, "banned": False},
 ]
 STATS = {
-    "ip": "192.168.1.50", "blocked": 3120, "allowed": 12480, "domains": 99643,
+    "ip": "192.168.1.50", "blocked": 3120, "allowed": 12480, "domains": 227420,
     "rssi": -58, "temp": 42.7, "heap": 219136, "uptime": "0d 2h 14m",
     "upurl": "", "upiv": 24, "upstat": "never", "blocking": True,
-    "fwVersion": "0.1.0", "fwProfile": "jc3636w518c",
-    "githubStatus": "Disponible: 0.1.1", "githubVersion": "0.1.1",
+    "fwVersion": "0.1.1", "fwProfile": "jc3636w518c",
+    "githubStatus": "Disponible: 0.2.0", "githubVersion": "0.2.0",
     "githubBusy": False, "githubCanInstall": True, "githubProgress": 0,
     "githubNonce": "documentation-preview-not-a-device-token", "resumeIn": 0,
     "clients": CLIENTS, "custom": [],
+}
+LISTS = {
+    "selectedProfile": "balanced", "appliedProfile": "balanced", "busy": False,
+    "status": "Lista verificada", "progress": 100,
+    "nonce": "documentation-preview-not-a-device-token",
+    "allowed": ["updates.example.com", "telemetry.example.net"], "domains": 227420,
 }
 ENTRIES = [
     {"domain": domain, "client": CLIENTS[index % 2]["ip"], "type": 1,
@@ -55,6 +61,8 @@ class PreviewHandler(BaseHTTPRequestHandler):
             self.reply(page, "text/html")
         elif url.path == "/stats.json":
             self.reply(json.dumps(STATS))
+        elif url.path == "/lists.json":
+            self.reply(json.dumps(LISTS))
         elif url.path == "/blocked.json":
             query = parse_qs(url.query)
             try:

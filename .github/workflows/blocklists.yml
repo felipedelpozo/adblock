@@ -1,0 +1,115 @@
+name: Curated blocklists
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+# A daily run and a manual run must never publish over one another.  Old
+# content-addressed assets retain a seven-day grace period and at least three
+# versions of each profile, so an in-flight download is never pruned.
+concurrency:
+  group: blocklists-release
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve pinned HaGeZi revision and license
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          from pathlib import Path
+
+          api = urllib.request.Request(
+              'https://api.github.com/repos/hagezi/dns-blocklists/commits/main',
+              headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'felipedelpozo-adblock-ci'},
+          )
+          with urllib.request.urlopen(api, timeout=30) as response:
+              commit = json.load(response)['sha']
+          license_url = f'https://raw.githubusercontent.com/hagezi/dns-blocklists/{commit}/LICENSE'
+          with urllib.request.urlopen(license_url, timeout=30) as response:
+              license_text = response.read()
+          Path('work').mkdir()
+          Path('work/hagezi-LICENSE.txt').write_bytes(license_text)
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env:
+              env.write(f'HAGEZI_COMMIT={commit}\n')
+          PY
+      - name: Run Python regression suites
+        run: python -m unittest discover -s tests -v
+      - name: Build pinned list release
+        run: |
+          python tools/package_blocklists.py \
+            --output release/blocklists \
+            --source-commit "$HAGEZI_COMMIT" \
+            --license-path work/hagezi-LICENSE.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: curated-blocklists-${{ github.sha }}
+          path: release/blocklists/
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: curated-blocklists-${{ github.sha }}
+          path: release/blocklists
+      - name: Create or update prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! gh release view blocklists --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release create blocklists --repo "$GH_REPO" --target "$GITHUB_SHA" \
+              --prerelease \
+              --title 'Curated DNS blocklists' \
+              --notes 'Daily HaGeZi-derived DNS blocklists. Content-addressed assets retain current, latest three per profile and a seven-day grace period; firmware stable releases use v* tags and are unaffected. Source files and GPL notices are included.'
+          else
+            gh release edit blocklists --repo "$GH_REPO" --prerelease --title 'Curated DNS blocklists'
+          fi
+      - name: Upload assets and notices
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          repo = os.environ['GH_REPO']
+          metadata = json.loads(subprocess.check_output(['gh', 'release', 'view', 'blocklists', '--repo', repo, '--json', 'assets']))
+          existing = {asset['name'] for asset in metadata['assets']}
+          for asset in sorted(Path('release/blocklists').iterdir()):
+              if not asset.is_file() or asset.name == 'manifest.json':
+                  continue
+              if asset.name.startswith(('blocklist-', 'hagezi-source-')) and asset.name in existing:
+                  continue  # Immutable assets never acquire a temporary 404 from clobbering.
+              subprocess.run(['gh', 'release', 'upload', 'blocklists', str(asset), '--repo', repo, '--clobber'], check=True)
+          PY
+      - name: Upload manifest last
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload blocklists release/blocklists/manifest.json --repo "$GH_REPO" --clobber
+      - name: Retain current and recent generations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/prune_blocklists.py --repo "${{ github.repository }}" --manifest release/blocklists/manifest.json

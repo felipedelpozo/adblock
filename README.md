@@ -30,6 +30,8 @@ LAN; see [security and limitations](SECURITY.md).
 
 - **DNS ad blocking:** flash-based domain hashes, parent-domain matching,
   custom domain rules and persistent client bans.
+- **Curated blocklists:** HaGeZi Light / PRO / PRO++ profiles, verified GitHub
+  list updates and persistent allowed-domain exceptions.
 - **Local dashboard:** live counters, observed clients and a searchable history
   of the last 64 blocked queries; no cloud account or external web assets.
 - **Round touch UI:** five swipe pages for status, activity, lists, network and
@@ -53,6 +55,10 @@ host-rendering method and physical-panel differences.
 ### Web dashboard and blocked-query history
 
 ![ESP32 DNS ad blocker dashboard with active blocking, counters, Wi-Fi status and searchable blocked-query history](docs/images/dashboard-overview.jpg)
+
+### HaGeZi profiles and allowed domains
+
+![ESP32 DNS dashboard with HaGeZi Light PRO PRO++ profile selection and persistent allowed domains](docs/images/dashboard-lists.jpg)
 
 ### Firmware updates from GitHub Releases
 
@@ -205,7 +211,7 @@ pio run -e jc3636w518c
 pio run -e c3 -e round-display -e s3-headless
 pio test -e native
 python -m unittest discover -s tests -v
-node --test tests/test_dashboard_firmware.cjs
+node --test tests/test_dashboard_*.cjs
 ```
 
 Node.js 22+ runs the dashboard unit tests; Python/PlatformIO build the firmware.
@@ -223,6 +229,13 @@ python tools/build_blocklist.py data/blocklist.bin
 The HaGeZi default uses the current `wildcard/light-onlydomains.txt` path.
 A failed source or empty list stops the build and preserves the old output.
 The result is sorted unique 40-bit FNV-1a hashes, matching the original engine.
+
+Firmware 0.2.0 also offers **Ligero**, **Equilibrado** (recommended) and
+**Estricto** directly in the dashboard. Existing installations retain their
+current list as **Personalizada** until a profile is explicitly applied.
+Allowed-domain exceptions cover subdomains and survive reboot/OTA. They
+override domain blocks, while client bans remain enforced. See
+[blocklist profiles, distribution and licensing](docs/BLOCKLIST_PROFILES.md).
 
 ## Identify, back up and flash
 
@@ -311,14 +324,14 @@ pio run -e jc3636w518c -t upload --upload-port c3adblock.local
 
 PlatformIO automatically selects espota when the upload port is an IP address or hostname.
 Use the same hardware environment for OTA. Browser OTA writes the inactive
-app slot; firmware updates preserve NVS/LittleFS. Blocklist upload and remote
-scheduled updates retain the original API. The original updater removes the
-old blocklist to make space before downloading its replacement: interrupted
-or invalid updates can leave no list and therefore fail open. Custom domains
-continue working even when the flash blocklist is absent.
+app slot; firmware updates preserve NVS/LittleFS. Blocklist uploads and remote
+scheduled updates validate a staged file before replacing the active list.
+Downloads keep the old list available. Insufficient staging space, truncated
+downloads and invalid hashes are rejected without deleting it. Custom domains
+continue working even when no flash blocklist has been installed.
 
 The upstream synchronous DNS forwarder may wait up to one second for an
-unresponsive upstream, and remote list downloads also block the main loop.
+unresponsive upstream. Remote list downloads use a separate worker.
 The display adds no background task or framebuffer. GitHub firmware downloads
 use a separate worker that yields between writes; DNS burst handling has a
 10 ms fairness bound between queries, but an individual upstream timeout can

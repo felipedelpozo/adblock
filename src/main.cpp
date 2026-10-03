@@ -10,8 +10,6 @@
 #include <ESPmDNS.h>
 #include <WebServer.h>
 #include <Update.h>            // firmware OTA
-#include <HTTPClient.h>        // remote blocklist fetch
-#include <WiFiClientSecure.h>  // https fetch
 #include <ArduinoOTA.h>        // network firmware flashing (pio run over wifi)
 #include <DNSServer.h>         // captive-portal catch-all DNS
 #include <Preferences.h>       // NVS store for provisioned WiFi creds
@@ -29,11 +27,12 @@ static const char* WIFI_PASS = "";
 #include "ui.h"
 #include "firmware_identity.h"
 #include "github_updater.h"
+#include "blocklist_manager.h"
+#include "domain_rules.h"
 
 // ---- config ----
 static const IPAddress UPSTREAM(9, 9, 9, 9);     // Quad9
 static const uint16_t DNS_PORT = 53;
-static const char* BLOCKLIST_PATH = "/blocklist.bin";
 static const int HASH_BYTES = 5;
 static const uint64_t HASH_MASK = (1ULL << (HASH_BYTES * 8)) - 1;
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -45,8 +44,7 @@ static const int BOOT_PIN = 9;
 // ---- globals ----
 WiFiUDP dnsServer, upstreamCli;
 WebServer web(80);
-File blocklist;
-uint32_t numHashes = 0, totalBlocked = 0, totalAllowed = 0;
+uint32_t totalBlocked = 0, totalAllowed = 0;
 uint8_t buf[600];
 
 struct Dev { uint32_t ip; uint8_t mac[6]; uint32_t blocked, allowed, lastSeen; bool banned; String label; };
@@ -55,6 +53,7 @@ Dev clients[MAX_CLIENTS]; int numClients = 0;
 
 static const int MAX_CUSTOM = 200;
 String customDom[MAX_CUSTOM]; uint64_t customHash[MAX_CUSTOM]; int numCustom = 0;
+domain_rules::Table allowlist;
 
 static const int MAX_BAN = 32;
 uint32_t bannedIP[MAX_BAN]; int numBanned = 0;
@@ -80,18 +79,12 @@ static uint64_t fnv40(const char* s, size_t n) {
   for (size_t i = 0; i < n; i++) { h ^= (uint8_t)s[i]; h *= 0x100000001b3ULL; }
   return h & HASH_MASK;
 }
-static bool inFlash(uint64_t h) {
-  int32_t lo = 0, hi = (int32_t)numHashes - 1; uint8_t b[HASH_BYTES];
-  while (lo <= hi) {
-    int32_t mid = (lo + hi) >> 1;
-    blocklist.seek((uint32_t)mid * HASH_BYTES); blocklist.read(b, HASH_BYTES);
-    uint64_t v = 0; for (int k = 0; k < HASH_BYTES; k++) v |= (uint64_t)b[k] << (8 * k);
-    if (v < h) lo = mid + 1; else if (v > h) hi = mid - 1; else return true;
-  }
-  return false;
-}
+static bool inFlash(uint64_t h) { return blocklistManager.contains(h); }
 static bool inCustom(uint64_t h) { for (int i = 0; i < numCustom; i++) if (customHash[i] == h) return true; return false; }
 static bool isBlocked(const char* domain, blocked_log::Reason* reason) {
+  // An allowlist only overrides domain rules.  Client bans are checked by the
+  // caller first and therefore remain enforced regardless of this table.
+  if (allowlist.containsSuffix(domain)) return false;
   const char* p = domain;
   while (p && *p) {
     uint64_t h = fnv40(p, strlen(p));
@@ -166,7 +159,6 @@ static size_t parseQuery(const uint8_t* pkt, int len, char* out, uint16_t* qtype
     if (o + l + 1 >= 250 || i + l > len) return 0; if (o) out[o++] = '.';
     for (uint8_t k = 0; k < l; k++) out[o++] = tolower(pkt[i++]); }
   out[o] = 0; if (i + 4 > len) return 0; *qtype = (pkt[i] << 8) | pkt[i + 1]; *qend = i + 4;
-  if (o > 4 && strncmp(out, "www.", 4) == 0) { memmove(out, out + 4, o - 3); o -= 4; }
   return o;
 }
 static int buildBlocked(int qend, uint16_t qtype) {
@@ -198,7 +190,7 @@ static bool handleDns() {
     Dev* c = getClient((uint32_t)cip);
     bool ban = c && c->banned;
     blocked_log::Reason reason = blocked_log::Reason::Client;
-    bool blocked = ban || (blocking.active() && dl && (numHashes || numCustom) && isBlocked(domain, &reason));
+    bool blocked = ban || (blocking.active() && dl && (blocklistManager.domains() || numCustom) && isBlocked(domain, &reason));
     int rlen;
     if (blocked) {
       rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++;
@@ -226,10 +218,11 @@ static String jesc(const String& s) {
 static void handleStats() {
   uint32_t up = millis() / 1000;
   char ut[24]; snprintf(ut, sizeof(ut), "%lud %luh %lum", up/86400, (up%86400)/3600, (up%3600)/60);
+  const String listStatus = blocklistManager.status();
   String j = "{\"ip\":\"" + WiFi.localIP().toString() + "\",\"blocked\":" + totalBlocked + ",\"allowed\":" + totalAllowed +
-             ",\"domains\":" + numHashes + ",\"rssi\":" + WiFi.RSSI() + ",\"temp\":" + String(temperatureRead(), 1) +
+             ",\"domains\":" + blocklistManager.domains() + ",\"rssi\":" + WiFi.RSSI() + ",\"temp\":" + String(temperatureRead(), 1) +
              ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
-             ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"" +
+             ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(listStatus) + "\"" +
              ",\"blocking\":" + (blocking.active() ? "true" : "false") +
              ",\"fwVersion\":\"" + jesc(String(firmware_identity::VERSION)) + "\",\"fwProfile\":\"" + firmware_identity::PROFILE +
              "\",\"githubStatus\":\"" + jesc(githubUpdater.status()) + "\",\"githubVersion\":\"" + jesc(githubUpdater.availableVersion()) +
@@ -250,55 +243,72 @@ static void handleBan() {
   web.send(200, "text/plain", "ok");
 }
 
-// ---------- blocklist swap (shared by upload + remote fetch) ----------
-// The partition holds one list, so we free the old one before writing the new.
-// While swapping, numHashes=0 -> device fail-opens (forwards, no blocking).
-static void reopenBlocklist() {
-  blocklist = LittleFS.open(BLOCKLIST_PATH, "r");
-  numHashes = blocklist ? blocklist.size() / HASH_BYTES : 0;
-}
-static void beginBlocklistSwap() {
-  if (blocklist) blocklist.close();
-  numHashes = 0;
-  LittleFS.remove(BLOCKLIST_PATH);
-  LittleFS.remove("/blocklist.new");
-}
-static bool commitNewBlocklist() {                  // /blocklist.new -> live (validated)
-  File f = LittleFS.open("/blocklist.new", "r");
-  size_t sz = f ? f.size() : 0; if (f) f.close();
-  bool ok = sz > 0 && (sz % HASH_BYTES) == 0;       // sorted hash blob -> 5-byte multiple
-  if (ok) LittleFS.rename("/blocklist.new", BLOCKLIST_PATH);
-  else    LittleFS.remove("/blocklist.new");
-  reopenBlocklist();
-  return ok;
+static void handleLists() {
+  String j = "{\"selectedProfile\":\"" + blocklistManager.selectedName() +
+             "\",\"appliedProfile\":\"" + blocklistManager.appliedName() +
+             "\",\"busy\":" + String(blocklistManager.busy() ? "true" : "false") +
+             ",\"status\":\"" + jesc(blocklistManager.status()) +
+             "\",\"progress\":" + String(blocklistManager.progress()) +
+             ",\"nonce\":\"" + jesc(githubCsrfNonce) + "\",\"allowed\":[";
+  for (size_t i = 0; i < allowlist.size(); ++i) {
+    j += (i ? "," : ""); j += "\""; j += jesc(String(allowlist.at(i))); j += "\"";
+  }
+  j += "],\"domains\":" + String(blocklistManager.domains()) + "}";
+  web.send(200, "application/json", j);
 }
 
 // ---------- OTA blocklist update (browser upload) ----------
+static bool validGithubOrigin();
 static bool upOk = false;
-static File upFile;
+static bool upActive = false;
+static bool upComplete = false;
+static bool upMultiple = false;
+static bool upConflict = false;
 static void handleUploadDone() {
-  web.send(upOk ? 200 : 500, "text/plain",
-           upOk ? "ok" : "rejected: empty or size not a multiple of 5 (not a blocklist.bin?)");
+  if (!validGithubOrigin() || web.header("X-CSRF-Token") != githubCsrfNonce) {
+    if (upActive) blocklistManager.abortUpload();
+    upActive = upComplete = false;
+    upConflict = false;
+    web.send(403, "text/plain", "csrf rejected"); return;
+  }
+  if (upComplete && !upMultiple) upOk = blocklistManager.completeUpload();
+  else if (upActive) { blocklistManager.abortUpload(); upOk = false; }
+  const int responseCode = upOk ? 200 : (upConflict ? 409 : 400);
+  const bool succeeded = upOk;
+  upOk = false;
+  upActive = upComplete = upMultiple = upConflict = false;
+  web.send(responseCode, "text/plain",
+           succeeded ? "ok" : "rejected: empty, unsorted or duplicate hash list");
 }
 static void handleUpload() {
+  if (!validGithubOrigin() || web.header("X-CSRF-Token") != githubCsrfNonce) { upOk = false; return; }
+  String contentType = web.header("Content-Type"); contentType.toLowerCase();
+  if (!contentType.startsWith("multipart/form-data")) { upOk = false; return; }
   HTTPUpload& u = web.upload();
   switch (u.status) {
     case UPLOAD_FILE_START:
-      upOk = false; beginBlocklistSwap();
-      upFile = LittleFS.open("/blocklist.new", "w");
+      if (upActive) {
+        // A second file part belongs to this request; invalidate only our
+        // staged upload and never touch a background profile operation.
+        blocklistManager.abortUpload(); upMultiple = true; upOk = false;
+      } else {
+        upOk = false; upComplete = false; upMultiple = false; upConflict = false;
+        if (githubUpdater.busy()) upConflict = true;
+        upActive = !upConflict && blocklistManager.beginUpload();
+        if (!upActive && !upConflict) upConflict = blocklistManager.busy();
+      }
       Serial.printf("[ota] receiving %s\n", u.filename.c_str());
       break;
     case UPLOAD_FILE_WRITE:
-      if (upFile) upFile.write(u.buf, u.currentSize);
+      if (upActive && !upMultiple && !blocklistManager.writeUpload(u.buf, u.currentSize)) upOk = false;
       break;
     case UPLOAD_FILE_END:
-      if (upFile) upFile.close();
-      upOk = commitNewBlocklist();
-      Serial.printf("[ota] %s -> %u domains\n", upOk ? "OK" : "REJECTED", numHashes);
+      if (upActive && !upMultiple) { upOk = blocklistManager.finishUpload(); upComplete = upOk; }
+      Serial.printf("[ota] %s -> %u domains\n", upOk ? "OK" : "REJECTED", blocklistManager.domains());
       break;
     case UPLOAD_FILE_ABORTED:
-      if (upFile) upFile.close();
-      LittleFS.remove("/blocklist.new"); reopenBlocklist();
+      if (upActive) blocklistManager.abortUpload();
+      upActive = upComplete = false; upOk = false; upConflict = false;
       Serial.println("[ota] aborted");
       break;
   }
@@ -310,7 +320,9 @@ static void loadUpdateCfg() {
   File f = LittleFS.open("/update.cfg", "r"); if (!f) return;
   updateUrl = f.readStringUntil('\n'); updateUrl.trim();
   String iv = f.readStringUntil('\n'); iv.trim(); if (iv.length()) updateIntervalH = iv.toInt();
-  f.close(); if (updateIntervalH < 1) updateIntervalH = 1;
+  f.close();
+  if (updateUrl.length() > 1024 || (updateUrl.length() && !updateUrl.startsWith("https://") && !updateUrl.startsWith("http://"))) updateUrl = "";
+  if (updateIntervalH < 1 || updateIntervalH > 720) updateIntervalH = 24;
 }
 static void saveUpdateCfg() {
   File f = LittleFS.open("/update.cfg", "w"); if (!f) return;
@@ -318,30 +330,10 @@ static void saveUpdateCfg() {
 }
 static bool fetchBlocklist(String url) {
   url.trim(); if (!url.length()) { updateStatus = "no url set"; return false; }
-  Serial.printf("[remote] GET %s\n", url.c_str());
-  WiFiClientSecure cs; cs.setInsecure();            // blocklist isn't secret -> skip cert pinning
-  WiFiClient cl;
-  HTTPClient http; http.setTimeout(20000);
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);  // GitHub release -> CDN redirect
-  bool https = url.startsWith("https");
-  if (!(https ? http.begin(cs, url) : http.begin(cl, url))) { updateStatus = "begin failed"; return false; }
-  int code = http.GET();
-  if (code != HTTP_CODE_OK) { http.end(); updateStatus = "HTTP " + String(code); Serial.printf("[remote] %s\n", updateStatus.c_str()); return false; }
-  beginBlocklistSwap();
-  File f = LittleFS.open("/blocklist.new", "w");
-  if (!f) { http.end(); updateStatus = "fs open failed"; reopenBlocklist(); return false; }
-  WiFiClient* stream = http.getStreamPtr();
-  int len = http.getSize(); uint8_t b[1024]; size_t total = 0; uint32_t idle = millis();
-  while (http.connected() && (len < 0 || (int)total < len)) {
-    size_t avail = stream->available();
-    if (avail) { int n = stream->readBytes(b, avail > sizeof(b) ? sizeof(b) : avail); if (n > 0) { f.write(b, n); total += n; idle = millis(); } }
-    else { if (millis() - idle > 15000) break; delay(2); }
-  }
-  f.close(); http.end();
-  bool ok = commitNewBlocklist();
-  updateStatus = ok ? ("ok: " + String(numHashes) + " domains") : ("bad data (" + String(total) + "B)");
-  Serial.printf("[remote] %s\n", updateStatus.c_str());
-  return ok;
+  if (githubUpdater.busy()) { updateStatus = "firmware updater busy"; return false; }
+  const bool accepted = blocklistManager.requestUrl(url);
+  updateStatus = accepted ? "download started" : "busy or unavailable";
+  return accepted;
 }
 
 // ---------- firmware OTA (browser upload of firmware.bin -> reboot) ----------
@@ -380,7 +372,7 @@ static void handleFwUpload() {
       return;
     }
     fwUploadSucceeded = fwUploadFailed = fwUploadConflict = false;
-    if (githubUpdater.busy() || !firmwareUpdateTryLock(0)) {
+    if (githubUpdater.busy() || blocklistManager.busy() || !firmwareUpdateTryLock(0)) {
       fwUploadConflict = true;
       Serial.println("[fw-ota] rejected: another OTA is active");
       return;
@@ -424,14 +416,94 @@ static bool authorizeGithubRequest() {
   return true;
 }
 
+static void loadAllowlist();
+static bool saveAllowlist();
+
+static void handleListProfile() {
+  if (!authorizeGithubRequest()) return;
+  if (githubUpdater.busy()) { web.send(409, "text/plain", "firmware updater busy"); return; }
+  BlocklistManager::Profile profile;
+  if (!BlocklistManager::profileFromName(web.arg("p").c_str(), profile) || profile == BlocklistManager::Profile::Custom) {
+    web.send(400, "text/plain", "invalid profile"); return;
+  }
+  if (!blocklistManager.requestProfile(profile)) { web.send(409, "text/plain", "list update busy or unavailable"); return; }
+  web.send(202, "text/plain", "profile update started");
+}
+
+static void handleListCheck() {
+  if (!authorizeGithubRequest()) return;
+  if (githubUpdater.busy()) { web.send(409, "text/plain", "firmware updater busy"); return; }
+  if (!blocklistManager.requestCheck()) { web.send(409, "text/plain", "list refresh busy or custom"); return; }
+  web.send(202, "text/plain", "list refresh started");
+}
+
+static void handleAllowlistAdd() {
+  if (!authorizeGithubRequest()) return;
+  const String value = web.arg("d");
+  char canonical[domain_rules::kMaxDomainLength + 1];
+  if (!domain_rules::normalize(value.c_str(), canonical, sizeof(canonical))) {
+    web.send(400, "text/plain", "invalid domain"); return;
+  }
+  if (!allowlist.addCanonical(canonical)) { web.send(409, "text/plain", "already allowed or full"); return; }
+  if (!saveAllowlist()) { loadAllowlist(); web.send(500, "text/plain", "allowlist persistence failed"); return; }
+  web.send(200, "text/plain", "ok");
+}
+
+static void handleAllowlistRemove() {
+  if (!authorizeGithubRequest()) return;
+  if (!allowlist.remove(web.arg("d").c_str())) { web.send(404, "text/plain", "not found"); return; }
+  if (!saveAllowlist()) { loadAllowlist(); web.send(500, "text/plain", "allowlist persistence failed"); return; }
+  web.send(200, "text/plain", "ok");
+}
+
+static void loadAllowlist() {
+  allowlist.clear();
+  if (!LittleFS.exists("/allowlist.txt")) return;
+  File f = LittleFS.open("/allowlist.txt", "r"); if (!f) return;
+  char line[domain_rules::kMaxDomainLength + 1]; size_t length = 0; bool overflow = false;
+  while (f.available() && allowlist.size() < domain_rules::kMaxRules) {
+    const int value = f.read();
+    if (value == '\n') {
+      if (!overflow) { line[length] = '\0'; allowlist.add(line); }
+      length = 0; overflow = false;
+    } else if (value != '\r') {
+      if (length < domain_rules::kMaxDomainLength) line[length++] = static_cast<char>(value);
+      else overflow = true;
+    }
+  }
+  if (length && !overflow) { line[length] = '\0'; allowlist.add(line); }
+  f.close();
+}
+
+static bool saveAllowlist() {
+  if (!blocklistFilesystemLock(1000)) return false;
+  LittleFS.remove("/allowlist.txt.new");
+  File f = LittleFS.open("/allowlist.txt.new", "w");
+  if (!f) { blocklistFilesystemUnlock(); return false; }
+  bool writeOk = true;
+  for (size_t i = 0; i < allowlist.size(); ++i) {
+    const String line = allowlist.at(i);
+    if (f.println(line) != line.length() + 2) { writeOk = false; break; }
+  }
+  f.flush();
+  f.close();
+  if (!writeOk) { LittleFS.remove("/allowlist.txt.new"); blocklistFilesystemUnlock(); return false; }
+  const bool renamed = LittleFS.rename("/allowlist.txt.new", "/allowlist.txt");
+  if (!renamed) LittleFS.remove("/allowlist.txt.new");
+  blocklistFilesystemUnlock();
+  return renamed;
+}
+
 static void handleGithubCheck() {
   if (!authorizeGithubRequest()) return;
+  if (blocklistManager.busy()) { web.send(409, "text/plain", "list update busy"); return; }
   if (!githubUpdater.requestCheck()) { web.send(409, "text/plain", "updater busy or unavailable"); return; }
   web.send(202, "text/plain", "update check started");
 }
 
 static void handleGithubInstall() {
   if (!authorizeGithubRequest()) return;
+  if (blocklistManager.busy()) { web.send(409, "text/plain", "list update busy"); return; }
   if (!githubUpdater.requestInstall(web.arg("v"))) {
     web.send(409, "text/plain", "check a compatible release first or updater busy"); return;
   }
@@ -461,7 +533,7 @@ static void serviceRoundUi(bool portal = false, const char* ap = "") {
     snapshot.portal = portal;
     snapshot.blocked = totalBlocked;
     snapshot.allowed = totalAllowed;
-    snapshot.domains = numHashes;
+    snapshot.domains = blocklistManager.domains();
     snapshot.customDomains = numCustom;
     snapshot.clients = numClients;
     snapshot.rssi = snapshot.connected ? WiFi.RSSI() : 0;
@@ -549,9 +621,9 @@ void setup() {
   // Never auto-format: an incompatible/missing filesystem must preserve user data.
   if (!LittleFS.begin(false)) Serial.println("[fs] mount failed; data preserved (no format)");
   round_ui::begin();
-  blocklist = LittleFS.open(BLOCKLIST_PATH, "r");
-  if (blocklist) { numHashes = blocklist.size() / HASH_BYTES; Serial.printf("blocklist: %u domains\n", numHashes); }
-  loadCustom(); loadBanned(); loadUpdateCfg();
+  blocklistManager.begin();
+  loadCustom(); loadAllowlist(); loadBanned(); loadUpdateCfg();
+  Serial.printf("blocklist: %u domains\n", blocklistManager.domains());
   Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
 
   // BOOT requests the portal without erasing previously saved credentials.
@@ -569,6 +641,11 @@ void setup() {
   dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/stats.json", handleStats);
+  web.on("/lists.json", HTTP_GET, handleLists);
+  web.on("/lists/profile", HTTP_POST, handleListProfile);
+  web.on("/lists/check", HTTP_POST, handleListCheck);
+  web.on("/allowlist/add", HTTP_POST, handleAllowlistAdd);
+  web.on("/allowlist/remove", HTTP_POST, handleAllowlistRemove);
   web.on("/blocked.json", []() { blocked_log::handleRequest(web); });
   web.on("/ban", handleBan);
   web.on("/addblock", []() { addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
@@ -585,10 +662,15 @@ void setup() {
   web.on("/update", HTTP_POST, handleFwUpdateDone, handleFwUpload);  // firmware OTA
   web.on("/github/install", HTTP_POST, handleGithubInstall);
   web.on("/github/check", HTTP_POST, handleGithubCheck);
-  web.on("/fetchnow", []() { fetchBlocklist(updateUrl); web.send(200, "text/plain", updateStatus); });
+  web.on("/fetchnow", []() { const bool accepted = fetchBlocklist(updateUrl); web.send(accepted ? 202 : 409, "text/plain", updateStatus); });
   web.on("/setupdate", []() {
-    if (web.hasArg("u")) updateUrl = web.arg("u");
-    if (web.hasArg("h")) { updateIntervalH = web.arg("h").toInt(); if (updateIntervalH < 1) updateIntervalH = 1; }
+    const String requestedUrl = web.hasArg("u") ? web.arg("u") : updateUrl;
+    const long requestedInterval = web.hasArg("h") ? web.arg("h").toInt() : static_cast<long>(updateIntervalH);
+    if (requestedUrl.length() > 1024 || (requestedUrl.length() && !requestedUrl.startsWith("https://") && !requestedUrl.startsWith("http://")) || requestedInterval < 1 || requestedInterval > 720) {
+      web.send(400, "text/plain", "invalid update settings"); return;
+    }
+    updateUrl = requestedUrl;
+    updateIntervalH = static_cast<uint32_t>(requestedInterval);
     saveUpdateCfg(); web.send(200, "text/plain", "ok");
   });
   web.begin();
@@ -603,18 +685,26 @@ void setup() {
 
 void loop() {
   blocking.tick(millis());
+  blocklistManager.poll();
   // ArduinoOTA calls Update.begin before its onStart callback. Guard the
   // complete handle call, so it can never alter a GitHub upload in progress.
-  if (firmwareUpdateTryLock(0)) {
+  if (!blocklistManager.busy() && firmwareUpdateTryLock(0)) {
     ArduinoOTA.handle();
     firmwareUpdateUnlock();
   }
   web.handleClient();
   bool busy = handleDns();
-  if (updateUrl.length()) {               // periodic remote blocklist auto-update
+  if (updateUrl.length() || blocklistManager.selectedProfile() != BlocklistManager::Profile::Custom) {
     uint32_t now = millis();
     if (lastCheckMs == 0) lastCheckMs = now;   // skip an immediate fetch on boot
-    else if (now - lastCheckMs >= updateIntervalH * 3600000UL) { lastCheckMs = now; fetchBlocklist(updateUrl); }
+    else if (now - lastCheckMs >= updateIntervalH * 3600000UL && !blocklistManager.busy() && !githubUpdater.busy()) {
+      lastCheckMs = now;
+      if (blocklistManager.selectedProfile() != BlocklistManager::Profile::Custom) {
+        updateStatus = blocklistManager.requestCheck() ? "profile refresh started" : "profile refresh unavailable";
+      } else {
+        fetchBlocklist(updateUrl);
+      }
+    }
   }
   serviceRoundUi();
   if (!busy) delay(1);   // sleep only when idle: full speed under load, cool when quiet

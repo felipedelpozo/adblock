@@ -32,6 +32,31 @@ class BlocklistBuilderTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(output.read_bytes(), b'original')
 
+    def test_idna_www_and_hosts_are_normalized_like_firmware(self):
+        domains, versions = builder.parse_domains(
+            '# Version: 2026.1003.1\n'
+            '0.0.0.0 WWW.Example.com example.net # comment\n'
+            'www.tést.example.\n'
+        )
+        self.assertEqual(domains, {'example.com', 'example.net', 'xn--tst-bma.example'})
+        self.assertEqual(versions, ('2026.1003.1',))
+
+    def test_unsupported_adblock_syntax_is_rejected(self):
+        for line in ('||ads.example^', 'ads.example##.banner', 'https://ads.example/path', 'ads.example^$third-party'):
+            with self.subTest(line=line):
+                with self.assertRaises(builder.BlocklistSourceError):
+                    builder.parse_domains(line)
+
+    def test_garbage_source_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'garbage.txt'
+            output = Path(folder) / 'list.bin'
+            source.write_text('not-a-domain\n')
+            output.write_bytes(b'previous')
+            with self.assertRaises(builder.BlocklistSourceError):
+                builder.build(output, [source])
+            self.assertEqual(output.read_bytes(), b'previous')
+
 
 if __name__ == '__main__':
     unittest.main()

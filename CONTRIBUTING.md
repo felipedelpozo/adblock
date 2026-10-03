@@ -13,7 +13,7 @@ python -m pip install platformio==6.1.19 esptool pyserial
 pio run -e c3 -e round-display -e s3-headless -e jc3636w518c
 pio test -e native
 python -m unittest discover -s tests -v
-node --test tests/test_dashboard_firmware.cjs
+node --test tests/test_dashboard_*.cjs
 ```
 
 The display build supplies the bundled encoder used by the host QR test. A host
@@ -54,3 +54,11 @@ CI validates stable `vMAJOR.MINOR.PATCH` tags, builds all four profiles, runs th
 - `firmware-jc3636w518c.bin`
 
 See [`docs/GITHUB_FIRMWARE_UPDATES.md`](docs/GITHUB_FIRMWARE_UPDATES.md) for the manifest contract and packaging commands. Releases are not published automatically by CI. The update path validates HTTPS, profile, version, size, SHA-256, and embedded identity before activation; it has no independent release signatures or automatic post-boot rollback.
+
+## Curated blocklists
+
+The daily `blocklists.yml` workflow publishes a separate prerelease using
+content-addressed binaries and pinned HaGeZi source/license archives. See
+[blocklist profiles](docs/BLOCKLIST_PROFILES.md) for format, retention, space
+checks and physical verification. Never overwrite an existing firmware release
+to refresh domain lists.

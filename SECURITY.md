@@ -6,6 +6,11 @@ ESP AdBlock Round is designed for use on a trusted local network. The dashboard,
 
 GitHub firmware updates use certificate-validated HTTPS and verify the repository, release metadata, profile, embedded identity, size, and SHA-256 before activating the inactive OTA slot. SHA-256 provides integrity checking; releases do not currently have independent signatures or automatic post-boot rollback.
 
+Curated blocklist updates validate HTTPS, canonical GitHub URLs, size, domain
+count, SHA-256 and sorted unique hashes before replacing the active file.
+Failed downloads leave the old list active. Origin and CSRF checks protect
+list administration against cross-site requests; they do not authenticate LAN users.
+
 ## Reporting a vulnerability
 
 If this repository has GitHub private vulnerability reporting enabled, use the **Report a vulnerability** action in the repository's Security tab. If it is unavailable, contact the repository owner through the public GitHub profile at [github.com/felipedelpozo](https://github.com/felipedelpozo) and request a private reporting channel. Do not include sensitive exploit details, credentials, flash dumps, or personal data in a public issue.

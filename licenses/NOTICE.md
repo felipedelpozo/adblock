@@ -20,3 +20,8 @@ manifest parsing; see `ArduinoJson_MIT.txt` and
 https://github.com/bblanchon/ArduinoJson.
 
 The AdBlock engine remains under the original MIT license in `LICENSE`.
+
+HaGeZi-derived curated DNS lists are distributed separately under GPL-3.0.
+Their release includes pinned source files, attribution and GPL license text.
+These data assets are not bundled into the firmware or covered by its MIT
+license. See `docs/BLOCKLIST_PROFILES.md`.

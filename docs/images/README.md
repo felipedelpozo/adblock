@@ -2,11 +2,12 @@
 
 ## Dashboard
 
-`dashboard-overview.jpg` and `dashboard-updates.jpg` are browser screenshots
+`dashboard-overview.jpg`, `dashboard-updates.jpg` and `dashboard-lists.jpg` are browser screenshots
 of the HTML/JavaScript in `src/page.h`. They are captured from a local read-only
 preview populated with synthetic data, not private network traffic or device
 credentials. The example addresses and locally administered MACs are fictional.
 The updater image illustrates the transition from installed `0.1.0` to `0.1.1`.
+The list image shows firmware 0.2.0 with the PRO profile and fictional domain exceptions.
 Screenshots illustrate the UI; release/device validation is recorded separately.
 
 Reproduce the source UI locally:
