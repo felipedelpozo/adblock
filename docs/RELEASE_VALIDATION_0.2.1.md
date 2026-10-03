@@ -107,6 +107,47 @@ manual firmware uploads without reboot. This check ran on 0.2.1 while the latest
 public stable release was still 0.1.1; it did not exercise a newer-version
 GitHub installation. The prior 0.1.0 to 0.1.1 installation is recorded separately.
 
+## Published firmware and final device checks
+
+PASS: [main CI](https://github.com/felipedelpozo/adblock/actions/runs/37146121112)
+and [tag CI](https://github.com/felipedelpozo/adblock/actions/runs/37146362153)
+for source `e5d5f9ac1178ca78c259483fc558dc2cef38f3f4`.
+The immutable `v0.2.1` tag points to that source.
+The public [0.2.1 release](https://github.com/felipedelpozo/adblock/releases/tag/v0.2.1)
+contains four application images, manifest, SHA256SUMS and license archive.
+The public files match the tag CI artifact byte-for-byte. The latest stable
+endpoint returns `v0.2.1`; the `blocklists` prerelease remains separate.
+Existing `v0.1.1` and discarded `v0.2.0` tags were not changed.
+
+| Public image | Packaged bytes | OTA slot bytes |
+| --- | ---: | ---: |
+| c3 | 1,181,984 | 1,376,256 |
+| round-display | 1,280,832 | 1,376,256 |
+| s3-headless | 1,098,480 | 2,097,152 |
+| jc3636w518c | 1,201,856 | 2,097,152 |
+
+The public JC3636W518C image SHA-256 is
+`b35888d3f9833b115ab5726a043432d928a2ede971fccf045fbdd3ac8a83886f`.
+Its size, chip, board, profile and embedded 0.2.1 identity were checked before
+manual application OTA. After installation, the changed boot nonce and serial
+identity confirmed restart into the published image. Wi-Fi, list/profile,
+update settings and temporary custom/allowed rules were retained. Exception
+precedence still worked; temporary test rules were then removed.
+
+PASS on the exact public image: PRO refresh from the public list manifest,
+196 single-attempt DNS queries (median 61.41 ms, p95 106.67 ms), unchanged boot
+nonce and 227,420 active domains. New mutation checks and invalid-list retention
+also passed. Serial showed only the intentional monitor-opening USB reset and
+application-OTA reboot, no assertion, failed read or unexpected restart.
+Display initialization and CST816 detection were reported ready.
+
+PASS: GitHub HTTPS check against the published release with 74 DNS queries
+(median 33.27 ms, p95 46.24 ms), CSRF/Origin and unconfirmed-install rejection,
+and empty/invalid manual firmware rejection without reboot. Dashboard,
+upstream, suffix blocking, five/thirty-minute pause and resume also passed.
+PRO remains active. This final installation used manual OTA at the same
+version; it does not claim a fresh older-to-newer GitHub-button installation.
+
 ## Limits
 
 Physical results apply to the S3 board above. This release does not change the
