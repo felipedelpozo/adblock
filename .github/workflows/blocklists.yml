@@ -92,17 +92,47 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           python3 - <<'PY'
-          import json, os, subprocess
+          import hashlib
+          import json
+          import os
+          import subprocess
           from pathlib import Path
+
           repo = os.environ['GH_REPO']
-          metadata = json.loads(subprocess.check_output(['gh', 'release', 'view', 'blocklists', '--repo', repo, '--json', 'assets']))
-          existing = {asset['name'] for asset in metadata['assets']}
+          release = json.loads(subprocess.check_output([
+              'gh', 'api', f'repos/{repo}/releases/tags/blocklists',
+          ]))
+          existing = {asset['name']: asset for asset in release['assets']}
+
+          def is_immutable(name):
+              return name.startswith(('blocklist-', 'hagezi-source-'))
+
+          def verify_existing(asset, expected_path):
+              payload = subprocess.check_output([
+                  'gh', 'api', '--header', 'Accept: application/octet-stream',
+                  f"repos/{repo}/releases/assets/{asset['id']}",
+              ])
+              expected = expected_path.read_bytes()
+              expected_sha256 = hashlib.sha256(expected).hexdigest()
+              actual_sha256 = hashlib.sha256(payload).hexdigest()
+              if len(payload) != len(expected) or actual_sha256 != expected_sha256:
+                  raise SystemExit(
+                      f"immutable asset mismatch for {expected_path.name}: "
+                      f"expected length={len(expected)} sha256={expected_sha256}, "
+                      f"remote length={len(payload)} sha256={actual_sha256}"
+                  )
+
           for asset in sorted(Path('release/blocklists').iterdir()):
               if not asset.is_file() or asset.name == 'manifest.json':
                   continue
-              if asset.name.startswith(('blocklist-', 'hagezi-source-')) and asset.name in existing:
-                  continue  # Immutable assets never acquire a temporary 404 from clobbering.
-              subprocess.run(['gh', 'release', 'upload', 'blocklists', str(asset), '--repo', repo, '--clobber'], check=True)
+              remote = existing.get(asset.name)
+              if remote is not None and is_immutable(asset.name):
+                  verify_existing(remote, asset)
+                  continue  # Verified immutable assets are never replaced.
+              command = ['gh', 'release', 'upload', 'blocklists', str(asset), '--repo', repo]
+              if not is_immutable(asset.name):
+                  command.append('--clobber')
+              subprocess.run(command, check=True)
           PY
       - name: Upload manifest last
         env:

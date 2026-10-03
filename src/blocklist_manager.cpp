@@ -7,6 +7,7 @@
 #include <ArduinoJson.h>
 #include <mbedtls/sha256.h>
 #include <time.h>
+#include <errno.h>
 
 #include "github_roots.h"
 #include "blocklist_model.h"
@@ -361,13 +362,20 @@ bool BlocklistManager::finishStage() {
 bool BlocklistManager::commitStage() {
   if (!commitPending_ || !LittleFS.exists(kStagePath)) return false;
   if (!blocklistFilesystemLock(1000)) return false;
+  // ESP LittleFS rejects replacement of an open destination (EBUSY).
+  // Activation runs on the DNS loop, so close the reader only for this short
+  // atomic rename and reopen the surviving path even if replacement fails.
+  if (live_) live_.close();
+  errno = 0;
   const bool renamed = LittleFS.rename(kStagePath, kLivePath);
-  if (renamed) {
-    if (live_) live_.close();
-    live_ = LittleFS.open(kLivePath, "r");
-  }
+  const int renameError = errno;
+  live_ = LittleFS.open(kLivePath, "r");
   blocklistFilesystemUnlock();
-  if (!renamed || !live_) return false;
+  if (!renamed || !live_) {
+    Serial.printf("[blocklist] activation failed rename=%d errno=%d reader=%d\n",
+                  renamed, renameError, static_cast<bool>(live_));
+    return false;
+  }
   bytes_ = live_.size(); domains_ = bytes_ / kHashBytes;
   applied_ = pendingProfile_;
   selected_ = pendingProfile_;
@@ -452,7 +460,17 @@ bool BlocklistManager::requestUrl(const String& url) {
 bool BlocklistManager::fetchManifest(Profile profile, Asset& asset) {
   WiFiClientSecure client; client.setCACert(GITHUB_ROOTS); client.setTimeout(8);
   HTTPClient http; http.setConnectTimeout(8000); http.setTimeout(10000); http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); http.setRedirectLimit(5);
-  if (!http.begin(client, kManifestUrl) || http.GET() != HTTP_CODE_OK) { http.end(); return false; }
+  // GitHub replaces a mutable release asset by delete/upload. Retry the
+  // short 404 window (and transient server failures) outside the DNS loop.
+  int code = 0;
+  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    if (!http.begin(client, kManifestUrl)) return false;
+    code = http.GET();
+    if (code == HTTP_CODE_OK) break;
+    http.end();
+    if (attempt == 2 || (code != HTTP_CODE_NOT_FOUND && code < 500)) return false;
+    delay(1000 * (attempt + 1));
+  }
   const int length = http.getSize();
   if (length > 12288) { http.end(); return false; }
   BoundedTextSink sink(12288);
