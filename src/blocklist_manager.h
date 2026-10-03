@@ -72,7 +72,6 @@ class BlocklistManager {
   void setFailure(const String& value);
   bool setStateMutex(uint32_t timeoutMs) const;
   void releaseStateMutex() const;
-  bool hasSpace(uint32_t newBytes) const;
   static bool validSha256(const String& value);
   static bool canonicalAssetUrl(const String& url, Profile profile, const String& sha256);
 
@@ -93,6 +92,7 @@ class BlocklistManager {
   bool hasPrevious_ = false;
   uint32_t stageDomains_ = 0;
   uint32_t stageBytes_ = 0;
+  uint32_t stageCapacity_ = 0;
   bool stageValid_ = false;
   bool uploading_ = false;
   std::atomic<bool> commitPending_{false};

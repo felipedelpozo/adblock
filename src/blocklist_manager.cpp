@@ -281,22 +281,25 @@ bool BlocklistManager::contains(uint64_t hash) const {
   return false;
 }
 
-bool BlocklistManager::hasSpace(uint32_t newBytes) const {
-  const size_t total = LittleFS.totalBytes();
-  const size_t used = LittleFS.usedBytes();
-  const size_t free = total > used ? total - used : 0;
-  return newBytes > 0 && newBytes <= kMaxListBytes && free >= static_cast<size_t>(newBytes) + kHeadroomBytes;
-}
-
 bool BlocklistManager::startStage(Profile profile, uint32_t expectedSize, uint32_t expectedDomains,
                                   const String& expectedSha256) {
   if (expectedSize > kMaxListBytes || (expectedSize && expectedSize % kHashBytes != 0) ||
       expectedDomains > kMaxListDomains || (expectedDomains && expectedSize != expectedDomains * kHashBytes) ||
       (expectedSha256.length() && !validSha256(expectedSha256))) return false;
-  if (expectedSize && !hasSpace(expectedSize)) { setFailure("Espacio insuficiente para conservar la lista activa"); return false; }
   if (!blocklistFilesystemLock(1000)) return false;
   LittleFS.remove(kStagePath);
   LittleFS.remove(kMarkerPath);
+  // usedBytes traverses the filesystem and stalls concurrent DNS reads.
+  // Reserve a byte budget once rather than traversing on every network chunk.
+  const size_t total = LittleFS.totalBytes();
+  const size_t used = LittleFS.usedBytes();
+  const size_t free = total > used ? total - used : 0;
+  stageCapacity_ = free > kHeadroomBytes ? min(static_cast<size_t>(kMaxListBytes), free - static_cast<size_t>(kHeadroomBytes)) : 0;
+  if (!stageCapacity_ || (expectedSize && expectedSize > stageCapacity_)) {
+    blocklistFilesystemUnlock();
+    setFailure("Espacio insuficiente para conservar la lista activa");
+    return false;
+  }
   stage_ = LittleFS.open(kStagePath, "w");
   blocklistFilesystemUnlock();
   if (!stage_) return false;
@@ -310,10 +313,7 @@ bool BlocklistManager::startStage(Profile profile, uint32_t expectedSize, uint32
 
 bool BlocklistManager::stageWrite(const uint8_t* data, size_t length) {
   if (!stage_ || !stageValid_ || !data || length == 0 || stageBytes_ + length > kMaxListBytes) { stageValid_ = false; return false; }
-  const size_t total = LittleFS.totalBytes();
-  const size_t used = LittleFS.usedBytes();
-  const size_t free = total > used ? total - used : 0;
-  if (free < length + kHeadroomBytes) { stageValid_ = false; return false; }
+  if (length > stageCapacity_ - stageBytes_) { stageValid_ = false; return false; }
   for (size_t i = 0; i < length; ++i) {
     record_[recordLength_++] = data[i];
     if (recordLength_ != kHashBytes) continue;
@@ -327,6 +327,7 @@ bool BlocklistManager::stageWrite(const uint8_t* data, size_t length) {
   blocklistFilesystemUnlock();
   stageBytes_ += static_cast<uint32_t>(written);
   if (written != length) stageValid_ = false;
+  if (stageExpectedSize_) progress_ = static_cast<uint8_t>(stageBytes_ * 90UL / stageExpectedSize_);
   return stageValid_;
 }
 
