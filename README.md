@@ -1,152 +1,184 @@
-# esp32-c3-adblock
+# ESP AdBlock Round
 
-A **Pi-hole-style DNS ad-blocker** that runs on a **$2 ESP32-C3** — *no PSRAM required*.
+An adaptation of [M-Abozaid/esp32-c3-adblock](https://github.com/M-Abozaid/esp32-c3-adblock)
+(upstream `c56456ac535844d9eecd6cfee030a2e23dc797d1`). The same DNS sinkhole,
+web dashboard, browser/Arduino OTA, captive portal, persistent client bans and
+custom domains, and scheduled blocklist updates run in all hardware profiles.
 
-> 📰 Featured on [Tom's Hardware](https://www.tomshardware.com/networking/clever-hacker-fits-537-000-domains-in-a-tiny-usd5-esp32-ad-blocking-dongle-firmware-uses-only-around-50kb-of-ram-and-can-answer-blocked-lookups-in-10-milliseconds), [XDA Developers](https://www.xda-developers.com/this-tiny-esp32-powered-gadget-blocks-537000-domains-only-uses-50kb-of-ram/), and [Korben](https://korben.info/en/half-million-ad-blocking-domains-50kb-ram-esp32.html).
+The device identified over USB on 2026-10-03 is a **Guition JC3636W518C,
+SW V0.9.1**, with an **ESP32-S3 revision 0.2, 16 MB flash and 8 MB OPI PSRAM**.
+It is a **1.8-inch ST77916 QSPI 360×360** display with **CST816S** touch,
+not the initially proposed ESP32-C3/GC9A01 board. Its USB port was
+`/dev/cu.usbmodem83201` (VID:PID `303a:1001`). Ports can change after reconnecting.
 
-The trick everyone misses: you don't need to keep the blocklist in RAM. Store the
-domains as **sorted 40-bit hashes in flash** and binary-search them. 140,000+ domains
-fit in ~0.7 MB of flash and are matched in ~10 ms, using **~50 KB of RAM**.
+## Hardware profiles
 
-```
-query in ──▶ extract domain ──▶ FNV-1a hash (+ parent suffixes)
-         ──▶ binary-search the flash hash table
-              ├─ hit  ──▶ answer 0.0.0.0   (sinkholed)
-              └─ miss ──▶ forward to upstream resolver, relay the reply
-```
+| Environment | Hardware | Display | Flash |
+|---|---|---|---|
+| `jc3636w518c` (default) | Confirmed Guition S3 | ST77916 QSPI, 360×360, CST816 | 16 MB |
+| `s3-headless` | Same S3, network services only | None | 16 MB |
+| `c3` | Original ESP32-C3 | None | 4 MB |
+| `round-display` | ESP32-2424S012C | GC9A01 SPI, 240×240, CST816 | 4 MB |
 
-## Why this is interesting
+The C3 display profile is compile-verified only; no such board was connected.
+USB identifies the chip and flash, not the PCB or LCD pinout. Never select a
+profile by USB vendor ID alone. The JC pinout was checked against the supplied
+model, factory firmware controller strings, manufacturer demo and schematics
+in [td0034/JC3636W518](https://github.com/td0034/JC3636W518) and the independent
+[itoulee/jc3636w518-demo](https://github.com/itoulee/jc3636w518-demo).
 
-Most ESP32 DNS sinkholes load the blocklist (domain *strings*) into RAM, so they
-demand PSRAM. This project stores fixed **5-byte (40-bit) hashes in flash** instead:
+| Function | JC3636W518C S3 | ESP32-2424S012C C3 |
+|---|---:|---:|
+| LCD clock | 9 | 6 |
+| LCD CS | 10 | 10 |
+| LCD D0 / MOSI | 11 | 7 |
+| LCD D1 / D2 / D3 | 12 / 13 / 14 | — |
+| LCD DC | QSPI command phase | 2 |
+| LCD reset | 47 | Unconnected |
+| Backlight | 15 | 3 |
+| Touch SDA / SCL | 7 / 8 | 4 / 5 |
+| Touch reset / interrupt | 40 / 41 | 1 / 0 |
+| Touch I²C address | 0x15 | 0x15 |
+| BOOT | 0 | 9 |
 
-| | string-in-RAM approach | this (hash-in-flash) |
-|---|---|---|
-| Hardware | ESP32 + PSRAM (~$8) | ESP32-C3, no PSRAM (~$2) |
-| 141k domains | ~2.5 MB of RAM | **0.67 MB of flash** |
-| RAM used | most of it | **~50 KB** |
-| Lookup | string compare | ~18 flash reads (~10 ms incl. WiFi RTT) |
-| Collisions | n/a | 0 at 141k (1 at 537k) |
+## Screen and touch
 
-**Why 40 bits?** It's the sweet spot for this flash budget. Collisions follow the
-birthday bound — at 141k domains you get ~0, at 537k about 1 (i.e. one unlucky
-domain gets over-blocked). Dropping to 32 bits would save 20% of the flash but
-cost ~7 collisions at 250k; going to 64 bits wastes 3 bytes per domain to solve
-a problem you don't have.
+LovyanGFX draws directly to the display: no LVGL, sprite or full-screen
+framebuffer. A shared logical 240×240 layout scales to 360×360. The screen
+shows ACTIVE/PAUSED, remaining pause time, blocked and allowed queries,
+blocked percentage, loaded and custom domains, observed DNS clients, RSSI
+and IP. The bottom buttons pause for 5 minutes, 30 minutes, or resume.
+Pauses are deliberately volatile and start ACTIVE after a restart; they
+share the exact same state as the web controls. Existing per-client bans
+remain enforced while domain blocking is paused.
 
-The same trick works on bigger chips — it isn't a C3 workaround. On a 16 MB
-ESP32-S3 these hashes hold **~2.7M domains** vs ~466k for strings in 8 MB of
-PSRAM. Hashes in flash beat strings in PSRAM basically everywhere; the C3 just
-makes it undeniable.
+Only changed regions redraw, clipped to one 8-row logical stripe per main-loop pass. State is
+sampled every 250 ms. Touch polling is bounded, checks the CST816 chip ID and
+emits one action per contact. Portal mode shows its AP name and IP; touch
+pause commands have no effect until network services are running. Serial logs
+include controller ID, touch coordinates/actions, heap and maximum render time.
 
-## Hardware
+Main integration is in `src/main.cpp`; display, UI and touch are separate
+modules. `boards/jc3636w518c.json` defines the actual 16 MB/8 MB board;
+`src/st77916_qspi.*` supplies the QSPI transport absent in LovyanGFX 1.2.7. `src/blocking_state.h` handles duration limits and clock rollover.
 
-- Any **ESP32-C3** board (tested on a C3 SuperMini), 4 MB flash, **no PSRAM needed**
-- Power it from a **stable USB source** (a phone charger or your router's USB port).
-  Cheap/loose USB-C→A adapters can brown out the radio during WiFi transmit.
-- A **USB-A → USB-C dongle** lets it plug straight into the spare USB port on the
-  back of most routers — no power supply, no extra box.
+## Build and tests
 
-### Enclosure
+Install Python 3.12+ and PlatformIO in a virtual environment:
 
-A printable case for the C3 SuperMini: [`hardware/esp32-c3-supermini-enclosure.stl`](hardware/esp32-c3-supermini-enclosure.stl)
-
-Printing notes:
-- No supports needed; 0.2 mm layers, ~15% infill is plenty.
-- **Keep the antenna end clear.** The C3's PCB antenna is the zig-zag trace on the
-  short edge opposite the USB-C port — don't bury it in solid plastic or put metal
-  near it, or your RSSI will suffer.
-- Leave the vents open: the board idles around 45–55 °C.
-
-## Build & flash (PlatformIO)
-
-One USB flash to get going — after that, **firmware and blocklist both update over WiFi** (see below).
-
-> ⚠️ Use a **current PlatformIO** — the VSCode PlatformIO extension's bundled core, or
-> `pip install -U platformio` in a venv. The distro/apt `platformio` package (e.g. 4.3.4) is
-> too old and fails with `AttributeError: ... 'resultcallback'` (issue #4). A one-click browser installer is on the way (hosting TBD).
-
-```bash
-# 1. (optional) set WiFi creds at compile time — or skip this and use the
-#    on-device setup portal (below). secrets.h is gitignored, stays local.
-cp src/secrets.example.h src/secrets.h
-#    then edit src/secrets.h -> WIFI_SSID / WIFI_PASS
-
-# 2. build the blocklist hash table (default = StevenBlack base + Hagezi Light,
-#    ~140k domains, WhatsApp/social safe)
-python3 tools/build_blocklist.py data/blocklist.bin
-
-# 3. flash firmware + the blocklist filesystem (the one and only USB flash)
-pio run -t upload
-pio run -t uploadfs
-
-# 4. watch it boot, note the IP / open the dashboard
-pio device monitor          # -> http://c3adblock.local
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install platformio esptool pyserial
+pio run -e jc3636w518c
+pio run -e c3 -e round-display -e s3-headless
+pio test -e native
+python -m unittest discover -s tests -v
 ```
 
-### WiFi setup (no re-flash needed)
+No `secrets.h` is required. Saved NVS credentials take precedence; otherwise
+use the captive portal. Optional compile-time credentials follow
+`src/secrets.example.h`; `src/secrets.h` is ignored by Git.
 
-If it can't connect (or you never set `secrets.h`), it starts an open access point
-**`C3-AdBlock-XXXX`** with a captive portal — join it from a phone, pick your network,
-type the password, done. To move it to a new network later: open `http://c3adblock.local/forgetwifi`,
-or hold the **BOOT** button while powering on, and the setup portal comes back.
+Build a blocklist from StevenBlack and HaGeZi Light:
 
-## Over-the-air updates (no more USB)
-
-The dashboard at **http://c3adblock.local** does it all:
-
-- **Blocklist** — drop a freshly built `blocklist.bin` into *Blocklist → Upload*, or set a
-  URL under *Remote auto-update* and the device pulls a prebuilt `blocklist.bin`
-  on a schedule (e.g. a GitHub release asset — update it once, every device fetches it).
-- **Firmware** — upload `.pio/build/c3/firmware.bin` under *Firmware → OTA update*; the
-  device verifies it and reboots into the new image. Or push over WiFi from the CLI:
-  ```bash
-  pio run -t upload --upload-port c3adblock.local --upload-protocol espota
-  ```
-
-**4 MB flash tradeoff:** firmware OTA needs *two* app slots, which leaves ~1.3 MB for the
-blocklist (**~250k domains max**). The aggressive 537k "ultimate" list only fits the
-single-app partition table (no firmware OTA). Pick your tradeoff in `partitions.csv`.
-
-## Use it
-
-Point a device's DNS at the C3's IP, or add it as a **secondary resolver** behind
-your main DNS. Test:
-
-```bash
-dig @<c3-ip> doubleclick.net   # -> 0.0.0.0  (blocked)
-dig @<c3-ip> github.com        # -> real IP  (forwarded)
+```sh
+mkdir -p data
+python tools/build_blocklist.py data/blocklist.bin
 ```
 
-## Gotchas (learned the hard way)
+The HaGeZi default uses the current `wildcard/light-onlydomains.txt` path.
+A failed source or empty list stops the build and preserves the old output.
+The result is sorted unique 40-bit FNV-1a hashes, matching the original engine.
 
-- **ModemManager** (default on Fedora/Ubuntu) grabs `/dev/ttyACM0` and toggles
-  DTR/RTS, which **resets the C3** and blocks serial. Fix:
-  ```bash
-  sudo systemctl stop ModemManager
-  echo 'ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"' | sudo tee /etc/udev/rules.d/99-esp-no-modemmanager.rules
-  sudo udevadm control --reload-rules && sudo udevadm trigger
-  ```
-- The C3's USB-Serial-JTAG console can swallow early boot output until the host
-  connects (`while(!Serial)` helps).
-- DNS clients add an **EDNS OPT** record; a blocked reply must contain only the
-  question + answer (ANCOUNT=1, NSCOUNT=ARCOUNT=0) or it's malformed.
+## Identify, back up and flash
 
-## Done / how it could grow
+Read-only chip/flash identification must come before firmware writes:
 
-- ✅ Web dashboard — per-client block/allow counts, ban a client, add custom domains
-- ✅ mDNS (`c3adblock.local`) for discovery
-- ✅ OTA — firmware + blocklist update over WiFi, plus scheduled remote blocklist pulls
-- ✅ Captive-portal WiFi setup (no hardcoded creds) + one-click browser web-installer
-- ⬜ Bucketed prefix index — ~18 flash reads/lookup → ~1–2 (issue #3), the throughput win
-- ⬜ Act as the DHCP server (hand itself out as DNS) for true plug-and-play
+```sh
+python -m serial.tools.list_ports -v
+esptool --port /dev/cu.usbmodem83201 chip-id
+esptool --port /dev/cu.usbmodem83201 flash-id
+esptool --port /dev/cu.usbmodem83201 read-flash 0 ALL original-flash.bin
+```
 
-## Credits
+Backups can contain private settings; keep them outside the repository.
+Do not run `erase-flash`. Firmware upload preserves NVS and the filesystem
+provided their partition offsets match the device:
 
-Inspired by [s60sc/ESP32_AdBlocker](https://github.com/s60sc/ESP32_AdBlocker) — the
-"answer 0.0.0.0 for blocklisted domains" idea. This is an independent from-scratch
-implementation focused on the hash-in-flash optimization for PSRAM-less chips.
+```sh
+pio run -e jc3636w518c -t upload --upload-port /dev/cu.usbmodem83201
+pio device monitor --port /dev/cu.usbmodem83201 --baud 115200
+```
 
-## License
+On this device the original factory `ffat` region at `0x410000`, size
+`0xbe0000`, was checked in the complete backup and contained only `0xff`.
+`partitions-s3.csv` preserves original NVS, both 2 MB OTA slots and coredump,
+relabeling that erased region for LittleFS (11.875 MiB). The C3 partition table
+is unchanged. LittleFS never auto-formats on mount failure.
 
-MIT — see [LICENSE](LICENSE).
+**Only for a verified empty initial filesystem**, upload the generated list:
+
+```sh
+pio run -e jc3636w518c -t uploadfs --upload-port /dev/cu.usbmodem83201
+```
+
+`uploadfs` replaces the whole filesystem. On an already configured device,
+use the dashboard's Blocklist Upload instead so custom domains, bans and
+update settings are retained. The SD card and audio/media files are unused
+and untouched by this project.
+
+## Wi-Fi and live checks
+
+If no saved Wi-Fi connects, join the open AP `C3-AdBlock-XXXX` and open
+`http://192.168.4.1`. Enter the network and password in the captive portal.
+After reboot, the serial monitor reports the station IP. BOOT requests the
+portal without deleting saved credentials; `/forgetwifi` remains an explicit
+credential reset in the upstream web interface.
+
+Open `http://c3adblock.local` or the reported IP. Point test devices/router
+DNS at that IP. Use it as the only advertised resolver when you want blocking:
+a second public DNS server can bypass the sinkhole.
+
+```sh
+python tools/verify_device.py DEVICE_IP
+# Or individual DNS queries:
+dig @DEVICE_IP doubleclick.net
+dig @DEVICE_IP example.org
+```
+
+The live check validates the dashboard, sinkhole, parent-domain matches,
+upstream resolution, web pauses and resume, then restores the initial pause
+state. Physical screen visibility and actual touch presses still require
+observation on the device; successful initialization alone is not visual proof.
+
+## OTA and persistent updates
+
+Upload `.pio/build/jc3636w518c/firmware.bin` through the dashboard Firmware
+section, or use Arduino OTA:
+
+```sh
+pio run -e jc3636w518c -t upload --upload-port c3adblock.local
+```
+
+PlatformIO automatically selects espota when the upload port is an IP address or hostname.
+Use the same hardware environment for OTA. Browser OTA writes the inactive
+app slot; firmware updates preserve NVS/LittleFS. Blocklist upload and remote
+scheduled updates retain the original API. The original updater removes the
+old blocklist to make space before downloading its replacement: interrupted
+or invalid updates can leave no list and therefore fail open. Custom domains
+continue working even when the flash blocklist is absent.
+
+The upstream synchronous DNS forwarder may wait up to one second for an
+unresponsive upstream, and remote list downloads also block the main loop.
+The display adds no background task or framebuffer; DNS burst handling has a
+10 ms fairness bound between queries, but an individual upstream timeout can
+still delay UI/web. The upstream dashboard/OTA are unauthenticated and intended
+for a trusted LAN; never expose them to the public Internet.
+
+## Upstream and license
+
+The original README is preserved in [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md).
+Original project by M-Abozaid, inspired by s60sc/ESP32_AdBlocker. The engine is MIT,
+see [LICENSE](LICENSE); the vendor display table carries Apache-2.0 attribution
+in [licenses/NOTICE.md](licenses/NOTICE.md).

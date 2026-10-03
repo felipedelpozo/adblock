@@ -17,8 +17,15 @@
 #include <Preferences.h>       // NVS store for provisioned WiFi creds
 #include "lwip/etharp.h"
 #include "lwip/netif.h"
-#include "secrets.h"   // WIFI_SSID / WIFI_PASS — used only as a FALLBACK if no creds
-                       // have been provisioned via the captive portal (copy secrets.example.h)
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+// No credentials in source: provision through the captive portal.
+static const char* WIFI_SSID = "";
+static const char* WIFI_PASS = "";
+#endif
+#include "blocking_state.h"
+#include "ui.h"
 
 // ---- config ----
 static const IPAddress UPSTREAM(9, 9, 9, 9);     // Quad9
@@ -26,6 +33,11 @@ static const uint16_t DNS_PORT = 53;
 static const char* BLOCKLIST_PATH = "/blocklist.bin";
 static const int HASH_BYTES = 5;
 static const uint64_t HASH_MASK = (1ULL << (HASH_BYTES * 8)) - 1;
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+static const int BOOT_PIN = 0;
+#else
+static const int BOOT_PIN = 9;
+#endif
 
 // ---- globals ----
 WiFiUDP dnsServer, upstreamCli;
@@ -56,8 +68,7 @@ DNSServer   dnsPortal;
 String      portalOpts;             // <option> list of scanned networks, built once at portal start
 
 // blocking pause (Pi-hole-style "disable for a while")
-bool     blockingOn = true;
-uint32_t resumeAt   = 0;            // millis() to auto-resume; 0 = paused indefinitely / not paused
+BlockingState blocking;
 
 // ---------- hashing / matching ----------
 static uint64_t fnv40(const char* s, size_t n) {
@@ -89,7 +100,8 @@ static bool isBlocked(const char* domain) {
 
 // ---------- persistence ----------
 static void loadCustom() {
-  numCustom = 0; File f = LittleFS.open("/custom.txt", "r"); if (!f) return;
+  numCustom = 0; if (!LittleFS.exists("/custom.txt")) return;
+  File f = LittleFS.open("/custom.txt", "r"); if (!f) return;
   while (f.available() && numCustom < MAX_CUSTOM) {
     String l = f.readStringUntil('\n'); l.trim(); l.toLowerCase();
     if (l.length() && l.indexOf('.') > 0) { customDom[numCustom] = l; customHash[numCustom] = fnv40(l.c_str(), l.length()); numCustom++; }
@@ -112,7 +124,8 @@ static void removeCustom(String d) {
 }
 static bool isBannedIP(uint32_t ip) { for (int i = 0; i < numBanned; i++) if (bannedIP[i] == ip) return true; return false; }
 static void loadBanned() {
-  numBanned = 0; File f = LittleFS.open("/banned.txt", "r"); if (!f) return;
+  numBanned = 0; if (!LittleFS.exists("/banned.txt")) return;
+  File f = LittleFS.open("/banned.txt", "r"); if (!f) return;
   while (f.available() && numBanned < MAX_BAN) { String l = f.readStringUntil('\n'); l.trim(); IPAddress ip; if (l.length() && ip.fromString(l)) bannedIP[numBanned++] = (uint32_t)ip; }
   f.close();
 }
@@ -167,7 +180,10 @@ static int forwardUpstream(int qlen) {
 // one packet per loop iteration. Returns true if any query was handled this call.
 static bool handleDns() {
   bool did = false;
+  const uint32_t startedAt = millis();
   for (int budget = 0; budget < 16; budget++) {
+    blocking.tick(millis());
+    if (budget && millis() - startedAt >= 10) break;
     int sz = dnsServer.parsePacket(); if (sz <= 0) break;
     did = true;
     IPAddress cip = dnsServer.remoteIP(); uint16_t cport = dnsServer.remotePort();
@@ -176,7 +192,7 @@ static bool handleDns() {
     size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
     Dev* c = getClient((uint32_t)cip);
     bool ban = c && c->banned;
-    bool blocked = ban || (blockingOn && dl && numHashes && isBlocked(domain));
+    bool blocked = ban || (blocking.active() && dl && (numHashes || numCustom) && isBlocked(domain));
     int rlen;
     if (blocked) { rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++; }
     else         { rlen = forwardUpstream(qlen);     totalAllowed++; if (c) c->allowed++; }
@@ -198,8 +214,8 @@ static void handleStats() {
              ",\"domains\":" + numHashes + ",\"rssi\":" + WiFi.RSSI() + ",\"temp\":" + String(temperatureRead(), 1) +
              ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
              ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"" +
-             ",\"blocking\":" + (blockingOn ? "true" : "false") +
-             ",\"resumeIn\":" + (uint32_t)(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0) +
+             ",\"blocking\":" + (blocking.active() ? "true" : "false") +
+             ",\"resumeIn\":" + blocking.remainingSeconds(millis()) +
              ",\"clients\":[";
   for (int i = 0; i < numClients; i++) { Dev& c = clients[i]; IPAddress ip(c.ip);
     j += (i ? "," : ""); j += "{\"ip\":\"" + ip.toString() + "\",\"mac\":\"" + macStr(c.mac) + "\",\"blocked\":" + c.blocked + ",\"allowed\":" + c.allowed + ",\"banned\":" + (c.banned?"true":"false") + "}"; }
@@ -269,6 +285,7 @@ static void handleUpload() {
 
 // ---------- remote blocklist auto-update ----------
 static void loadUpdateCfg() {
+  if (!LittleFS.exists("/update.cfg")) return;
   File f = LittleFS.open("/update.cfg", "r"); if (!f) return;
   updateUrl = f.readStringUntil('\n'); updateUrl.trim();
   String iv = f.readStringUntil('\n'); iv.trim(); if (iv.length()) updateIntervalH = iv.toInt();
@@ -327,6 +344,45 @@ static void handleFwUpload() {
   }
 }
 
+// Display and web controls share the same volatile pause state.
+static void serviceRoundUi(bool portal = false, const char* ap = "") {
+#ifdef ROUND_DISPLAY
+  const uint32_t now = millis();
+  const round_ui::Action action = round_ui::poll(now);
+  if (!portal) {
+    switch (action) {
+      case round_ui::Action::Pause5Minutes: blocking.pause(now, 300); break;
+      case round_ui::Action::Pause30Minutes: blocking.pause(now, 1800); break;
+      case round_ui::Action::Resume: blocking.resume(); break;
+      default: break;
+    }
+  }
+  // Network values only need sampling at the UI refresh rate.
+  static round_ui::Snapshot snapshot;
+  static uint32_t sampledAt = 0;
+  if (sampledAt == 0 || now - sampledAt >= 250 || action != round_ui::Action::None) {
+    sampledAt = now;
+    snapshot.blocking = blocking.active();
+    snapshot.connected = WiFi.status() == WL_CONNECTED;
+    snapshot.portal = portal;
+    snapshot.blocked = totalBlocked;
+    snapshot.allowed = totalAllowed;
+    snapshot.domains = numHashes;
+    snapshot.customDomains = numCustom;
+    snapshot.clients = numClients;
+    snapshot.rssi = snapshot.connected ? WiFi.RSSI() : 0;
+    snapshot.resumeSeconds = blocking.remainingSeconds(now);
+    const IPAddress ip = portal ? WiFi.softAPIP() : WiFi.localIP();
+    snprintf(snapshot.ip, sizeof(snapshot.ip), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+    snprintf(snapshot.ap, sizeof(snapshot.ap), "%s", ap);
+  }
+  round_ui::update(snapshot, now);
+#else
+  (void)portal;
+  (void)ap;
+#endif
+}
+
 // ---------- WiFi provisioning (captive portal) ----------
 // Try provisioned NVS creds first, then the compile-time secrets.h creds as a
 // fallback (so the maintainer's own device + source builders keep working). If
@@ -342,7 +398,7 @@ static bool connectWiFi() {
   Serial.printf("WiFi: connecting to \"%s\"%s\n", ssid, ss.length() ? " (provisioned)" : " (secrets.h)");
   WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.begin(ssid, pass);
   uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) { delay(250); Serial.print("."); }
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) { serviceRoundUi(); delay(10); }
   Serial.println();
   return WiFi.status() == WL_CONNECTED;
 }
@@ -387,25 +443,31 @@ static void startConfigPortal() {
   web.begin();
   Serial.printf("\n[setup] No WiFi. Join open network \"%s\" and a setup page pops up (or http://%s)\n",
                 ap, apIP.toString().c_str());
-  while (true) { dnsPortal.processNextRequest(); web.handleClient(); delay(2); }
+  while (true) { dnsPortal.processNextRequest(); web.handleClient(); serviceRoundUi(true, ap); delay(2); }
 }
 
 void setup() {
   Serial.begin(115200); delay(300);
-  Serial.println("\n[c3-adblock] booting");
-  if (!LittleFS.begin(true)) Serial.println("LittleFS FAILED");
+  Serial.printf("\n[adblock] booting chip=%s flash=%lu psram=%lu\n",
+      ESP.getChipModel(), static_cast<unsigned long>(ESP.getFlashChipSize()),
+      static_cast<unsigned long>(ESP.getPsramSize()));
+  // Never auto-format: an incompatible/missing filesystem must preserve user data.
+  if (!LittleFS.begin(false)) Serial.println("[fs] mount failed; data preserved (no format)");
+  round_ui::begin();
   blocklist = LittleFS.open(BLOCKLIST_PATH, "r");
   if (blocklist) { numHashes = blocklist.size() / HASH_BYTES; Serial.printf("blocklist: %u domains\n", numHashes); }
   loadCustom(); loadBanned(); loadUpdateCfg();
   Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
 
-  // Hold BOOT (GPIO9) at power-on to wipe saved WiFi and force the setup portal.
-  pinMode(9, INPUT_PULLUP);
-  if (digitalRead(9) == LOW) { delay(60);
-    if (digitalRead(9) == LOW) { prefs.begin("wifi", false); prefs.clear(); prefs.end();
-      Serial.println("[setup] BOOT held -> cleared saved WiFi"); } }
+  // BOOT requests the portal without erasing previously saved credentials.
+  pinMode(BOOT_PIN, INPUT_PULLUP);
+  bool forcePortal = false;
+  if (digitalRead(BOOT_PIN) == LOW) { delay(60);
+    if (digitalRead(BOOT_PIN) == LOW) {
+      forcePortal = true;
+      Serial.println("[setup] BOOT held -> portal (saved WiFi preserved)"); } }
 
-  if (!connectWiFi()) startConfigPortal();   // portal blocks + reboots on save; returns only when connected
+  if (forcePortal || !connectWiFi()) startConfigPortal();
   Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
   if (MDNS.begin("c3adblock")) { MDNS.addService("http", "tcp", 80); Serial.println("dashboard: http://c3adblock.local"); }
 
@@ -417,10 +479,10 @@ void setup() {
   web.on("/unblock", []() { removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/pause", []() {                    // /pause?s=300  (0 or absent = indefinite)
     long s = web.hasArg("s") ? web.arg("s").toInt() : 0;
-    blockingOn = false; resumeAt = (s > 0) ? millis() + (uint32_t)s * 1000UL : 0;
+    blocking.pause(millis(), s > 0 ? (uint32_t)s : 0);
     web.send(200, "text/plain", "paused");
   });
-  web.on("/resume", []() { blockingOn = true; resumeAt = 0; web.send(200, "text/plain", "resumed"); });
+  web.on("/resume", []() { blocking.resume(); web.send(200, "text/plain", "resumed"); });
   web.on("/forgetwifi", []() { web.send(200, "text/plain", "cleared — rebooting into setup portal");
     prefs.begin("wifi", false); prefs.clear(); prefs.end(); delay(500); ESP.restart(); });
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);      // blocklist OTA
@@ -438,14 +500,15 @@ void setup() {
 }
 
 void loop() {
+  blocking.tick(millis());
   ArduinoOTA.handle();
   web.handleClient();
   bool busy = handleDns();
-  if (!blockingOn && resumeAt && (int32_t)(millis() - resumeAt) >= 0) { blockingOn = true; resumeAt = 0; }
   if (updateUrl.length()) {               // periodic remote blocklist auto-update
     uint32_t now = millis();
     if (lastCheckMs == 0) lastCheckMs = now;   // skip an immediate fetch on boot
     else if (now - lastCheckMs >= updateIntervalH * 3600000UL) { lastCheckMs = now; fetchBlocklist(updateUrl); }
   }
+  serviceRoundUi();
   if (!busy) delay(1);   // sleep only when idle: full speed under load, cool when quiet
 }

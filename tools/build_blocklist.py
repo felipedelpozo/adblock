@@ -30,7 +30,7 @@ U64 = (1 << 64) - 1
 # single-app (no-OTA) partition table.
 DEFAULT_SOURCES = [
     'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts',            # base: ads + malware
-    'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt',  # Hagezi Light
+    'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light-onlydomains.txt',
 ]
 
 def fnv(b: bytes) -> int:
@@ -59,7 +59,7 @@ def main():
         try:
             data = read_source(src)
         except Exception as e:
-            print(f'  !! skipped {src}: {e}', file=sys.stderr); continue
+            raise SystemExit(f'Unable to read {src}: {e}; output left unchanged')
         for line in data.splitlines():
             line = line.split('#', 1)[0].strip()
             if not line or line[0] in '!/':
@@ -75,9 +75,13 @@ def main():
     hashes = sorted(fnv(d.encode()) for d in domains)
     collisions = len(hashes) - len(set(hashes))
     uniq = sorted(set(hashes))                       # one entry per distinct hash
-    with open(out, 'wb') as f:
+    if not uniq:
+        raise SystemExit('No valid domains; output left unchanged')
+    temporary = out + '.tmp'
+    with open(temporary, 'wb') as f:
         for h in uniq:
             f.write(h.to_bytes(HASH_BYTES, 'little'))
+    os.replace(temporary, out)
 
     n, size = len(uniq), len(uniq) * HASH_BYTES
     print(f'source domains   : {len(domains):,}')
