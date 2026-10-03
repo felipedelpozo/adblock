@@ -25,6 +25,7 @@ static const char* WIFI_SSID = "";
 static const char* WIFI_PASS = "";
 #endif
 #include "blocking_state.h"
+#include "blocked_log.h"
 #include "ui.h"
 
 // ---- config ----
@@ -87,11 +88,12 @@ static bool inFlash(uint64_t h) {
   return false;
 }
 static bool inCustom(uint64_t h) { for (int i = 0; i < numCustom; i++) if (customHash[i] == h) return true; return false; }
-static bool isBlocked(const char* domain) {
+static bool isBlocked(const char* domain, blocked_log::Reason* reason) {
   const char* p = domain;
   while (p && *p) {
     uint64_t h = fnv40(p, strlen(p));
-    if (inFlash(h) || inCustom(h)) return true;
+    if (inCustom(h)) { *reason = blocked_log::Reason::Custom; return true; }
+    if (inFlash(h)) { *reason = blocked_log::Reason::Blocklist; return true; }
     const char* dot = strchr(p, '.'); if (!dot) break;
     const char* next = dot + 1; if (!strchr(next, '.')) break; p = next;
   }
@@ -192,9 +194,13 @@ static bool handleDns() {
     size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
     Dev* c = getClient((uint32_t)cip);
     bool ban = c && c->banned;
-    bool blocked = ban || (blocking.active() && dl && (numHashes || numCustom) && isBlocked(domain));
+    blocked_log::Reason reason = blocked_log::Reason::Client;
+    bool blocked = ban || (blocking.active() && dl && (numHashes || numCustom) && isBlocked(domain, &reason));
     int rlen;
-    if (blocked) { rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++; }
+    if (blocked) {
+      rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++;
+      blocked_log::record(dl ? domain : nullptr, static_cast<uint32_t>(cip), qtype, reason);
+    }
     else         { rlen = forwardUpstream(qlen);     totalAllowed++; if (c) c->allowed++; }
     if (rlen > 0) { dnsServer.beginPacket(cip, cport); dnsServer.write(buf, rlen); dnsServer.endPacket(); }
   }
@@ -203,7 +209,14 @@ static bool handleDns() {
 
 // ---------- web ----------
 static String macStr(const uint8_t* m) { char s[18]; snprintf(s, sizeof(s), "%02x:%02x:%02x:%02x:%02x:%02x", m[0],m[1],m[2],m[3],m[4],m[5]); return String(s); }
-static String jesc(const String& s) { String o; for (char ch : s) { if (ch == '"' || ch == '\\') o += '\\'; o += ch; } return o; }
+static String jesc(const String& s) {
+  String escaped;
+  for (unsigned char ch : s) {
+    if (ch >= 0x7f) { escaped += static_cast<char>(ch); continue; }
+    char byte[7]; blocked_log::escapeJsonByte(ch, byte); escaped += byte;
+  }
+  return escaped;
+}
 
 #include "page.h"   // dashboard HTML (PROGMEM) — see issue #6
 
@@ -474,6 +487,7 @@ void setup() {
   dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/stats.json", handleStats);
+  web.on("/blocked.json", []() { blocked_log::handleRequest(web); });
   web.on("/ban", handleBan);
   web.on("/addblock", []() { addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/unblock", []() { removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });

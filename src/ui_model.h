@@ -26,6 +26,10 @@ struct Snapshot {
   char ap[24] = {};
 };
 
+inline bool controlStateChanged(const Snapshot& previous, const Snapshot& next) {
+  return previous.blocking != next.blocking || previous.portal != next.portal;
+}
+
 // The counters can be close to UINT32_MAX on a long-running appliance. Do the
 // multiplication after widening so the percentage never wraps at 2^32.
 inline uint8_t blockedPercent(uint32_t blocked, uint32_t allowed) {

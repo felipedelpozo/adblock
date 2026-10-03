@@ -62,6 +62,31 @@ Main integration is in `src/main.cpp`; display, UI and touch are separate
 modules. `boards/jc3636w518c.json` defines the actual 16 MB/8 MB board;
 `src/st77916_qspi.*` supplies the QSPI transport absent in LovyanGFX 1.2.7. `src/blocking_state.h` handles duration limits and clock rollover.
 
+## Recent blocked-query history
+
+The dashboard now includes a searchable, paginated history of the **last 64
+blocked DNS requests**, newest first: requested domain, client IP, DNS type,
+reason (blocklist, custom domain or banned client), and elapsed time. History
+uses approximately 17 KiB of fixed RAM in every profile and is cleared on
+reboot. The DNS capture path does not allocate memory or write to flash.
+Allowed requests are not logged.
+
+`GET /blocked.json?offset=0&limit=16&q=example` returns up to 16 entries per
+page. Search matches domains and client IPs without case sensitivity and is
+limited to 63 characters. All DNS bytes are escaped before JSON serialization;
+the browser displays received strings as text. No external assets are needed.
+
+The round display uses a central blocking percentage, compact counters, a
+network panel, clear status/countdown and state-aware touch controls. A round
+robin repaint schedule prevents continuously changing statistics from delaying
+network and control regions. Rendering remains clipped to eight logical rows,
+without a full-screen framebuffer.
+
+Run `python tools/verify_history.py DEVICE_IP` to check the live history. This
+deliberately generates 80 blocked queries and replaces the volatile recent
+history; it does not modify persistent settings. DNS blocking cannot reliably
+remove YouTube advertisements served from domains shared with video content.
+
 ## Build and tests
 
 Install Python 3.12+ and PlatformIO in a virtual environment:

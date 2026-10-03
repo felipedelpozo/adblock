@@ -1,4 +1,5 @@
 # Device validation — 2026-10-03
+> This report describes the initial hardware bring-up. See `DASHBOARD_UI_VALIDATION.md` for the current dashboard/history/display revision and firmware hash.
 
 Status: implementation, USB installation, live DNS/dashboard/HTTP OTA and persistence
 checks complete. The user confirmed the screen and all three touch controls on the device.
@@ -124,7 +125,7 @@ not a capacity benchmark.
 The original blocklist updater may fail open after an interrupted replacement.
 See `README.md` for the preserved behavior and safe update instructions.
 
-Final flashed firmware.bin: 1,093,024 bytes; SHA-256 `cd3f9f33aff3dd22691245e401e143085d9a1d030e55c1f7798e315da54ee343`.
+Initial bring-up firmware.bin: 1,093,024 bytes; SHA-256 `cd3f9f33aff3dd22691245e401e143085d9a1d030e55c1f7798e315da54ee343`.
 
 ## Live network evidence
 
