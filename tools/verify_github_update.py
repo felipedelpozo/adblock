@@ -49,7 +49,7 @@ def main():
     result = None
     while time.monotonic() < deadline:
         start = time.monotonic()
-        answer = resolve(ip, 'doubleclick.net')
+        answer = resolve(ip, 'googlesyndication.com')
         samples.append((time.monotonic() - start) * 1000)
         if initial['blocking']:
             assert answer == ['0.0.0.0'], answer

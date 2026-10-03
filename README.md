@@ -309,7 +309,7 @@ activating its inactive OTA slot. Wi-Fi, settings and LittleFS are retained.
 No releases means no installation; updates are never installed automatically.
 See [GitHub update and release instructions](docs/GITHUB_FIRMWARE_UPDATES.md)
 for the manifest contract, publishing the six release assets and CI builds.
-See the [latest v0.1.1 release validation](docs/RELEASE_VALIDATION_0.1.1.md)
+See the [latest v0.2.0 release validation](docs/RELEASE_VALIDATION_0.2.0.md)
 for published-asset checksums and the physical OTA/device evidence. The
 [pre-release GitHub and QR validation](docs/GITHUB_QR_VALIDATION.md) remains as
 historical preparation evidence; optical phone-camera QR scanning is still

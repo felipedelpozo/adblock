@@ -64,18 +64,18 @@ def main():
     assert b'<html' in request(ip, '/').lower(), 'Dashboard unavailable'
     try:
         request(ip, '/resume')
-        assert resolve(ip, 'doubleclick.net') == ['0.0.0.0'], 'Sinkhole failed'
-        assert resolve(ip, 'test.doubleclick.net') == ['0.0.0.0'], 'Suffix matching failed'
+        assert resolve(ip, 'googlesyndication.com') == ['0.0.0.0'], 'Sinkhole failed'
+        assert resolve(ip, 'test.googlesyndication.com') == ['0.0.0.0'], 'Suffix matching failed'
         forwarded = resolve(ip, 'example.org')
         assert forwarded and '0.0.0.0' not in forwarded, forwarded
         for duration in (300, 1800):
             request(ip, f'/pause?s={duration}')
             paused = stats(ip)
             assert not paused['blocking'] and duration - 5 <= paused['resumeIn'] <= duration, paused
-            assert '0.0.0.0' not in resolve(ip, 'doubleclick.net'), 'Pause failed to forward'
+            assert '0.0.0.0' not in resolve(ip, 'googlesyndication.com'), 'Pause failed to forward'
         request(ip, '/resume')
         assert stats(ip)['blocking'], 'Resume failed'
-        assert resolve(ip, 'doubleclick.net') == ['0.0.0.0'], 'Resume failed to block'
+        assert resolve(ip, 'googlesyndication.com') == ['0.0.0.0'], 'Resume failed to block'
         print('PASS: dashboard, block/suffix, upstream, 5/30 minute pauses and resume')
         print(json.dumps(stats(ip), indent=2))
     finally:

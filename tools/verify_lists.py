@@ -91,7 +91,7 @@ def main():
         assert post(ip, '/upload', nonce, origin)[0] == 400, 'Empty upload accepted'
         after = lists(ip)
         assert after['domains'] == before['domains'] and after['appliedProfile'] == before['appliedProfile']
-        assert resolve(ip, 'doubleclick.net') == ['0.0.0.0'], 'Old list lost on invalid upload'
+        assert resolve(ip, 'googlesyndication.com') == ['0.0.0.0'], 'Old list lost on invalid upload'
         print('PASS: CSRF, domain validation, allowlist precedence/removal, invalid list preserves active list')
         if args.profile:
             code, message = post(ip, '/lists/profile?p=' + args.profile, nonce, origin)
@@ -99,7 +99,7 @@ def main():
             deadline = time.monotonic() + 180
             while time.monotonic() < deadline:
                 tick = time.monotonic()
-                assert resolve(ip, 'doubleclick.net') == ['0.0.0.0'], 'DNS blocking lost during download'
+                assert resolve(ip, 'googlesyndication.com') == ['0.0.0.0'], 'DNS blocking lost during download'
                 samples.append((time.monotonic() - tick) * 1000)
                 after = lists(ip)
                 if not after['busy']:
