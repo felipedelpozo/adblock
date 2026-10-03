@@ -13,3 +13,16 @@ src/secrets.h
 __pycache__/
 *.tmp
 .venv/
+
+# Generated firmware / private flash images and local diagnostics
+*.bin
+*.elf
+*.map
+*.log
+.DS_Store
+.env
+.env.*
+backups/
+device-backup/
+release/
+dist/

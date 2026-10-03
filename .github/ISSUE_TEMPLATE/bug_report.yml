@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a reproducible problem with the firmware, dashboard, or build.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include passwords, tokens, private network details, credentials, flash dumps, or other sensitive data. Security vulnerabilities belong in the private reporting path described in SECURITY.md.
+  - type: input
+    id: profile
+    attributes:
+      label: Firmware profile
+      description: One of jc3636w518c, s3-headless, c3, or round-display.
+      placeholder: jc3636w518c
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Firmware version or commit
+      placeholder: v0.1.0 or abc1234
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: Board, display/touch model, and relevant connection details. Sanitize private values.
+      placeholder: Guition JC3636W518C, ST77916/CST816
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Sanitized reproduction
+      description: Steps, expected result, actual result, and relevant logs with secrets removed.
+      placeholder: |
+        1. ...
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Optional sanitized evidence. Do not attach credentials or flash dumps.

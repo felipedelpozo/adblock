@@ -17,7 +17,7 @@ constexpr uint32_t kTouchPollMs = 20;
 bool resetHeld = false;
 bool chipProbed = false;
 bool chipSupported = false;
-bool fingerDown = false;
+round_ui::GestureTracker tracker;
 uint8_t chipId = 0;
 uint32_t resetReleaseAt = 0;
 uint32_t probeAt = 0;
@@ -55,7 +55,7 @@ bool begin() {
   resetHeld = true;
   chipProbed = false;
   chipSupported = false;
-  fingerDown = false;
+  tracker.reset();
   chipId = 0;
   resetReleaseAt = millis() + kResetLowMs;
   probeAt = resetReleaseAt + kProbeWaitMs;
@@ -65,8 +65,8 @@ bool begin() {
 
 bool ready() { return chipProbed && chipSupported; }
 
-Point poll(uint32_t now) {
-  Point point;
+Gesture poll(uint32_t now) {
+  Gesture point;
   if (resetHeld) {
     if (!due(now, resetReleaseAt)) return point;
     digitalWrite(round_ui::pins::kTouchReset, HIGH);
@@ -97,22 +97,24 @@ Point poll(uint32_t now) {
   if (!due(now, touchPollAt)) return point;
   touchPollAt = now + kTouchPollMs;
   uint8_t data[5] = {};
-  if (!readRegisters(kTouchDataRegister, data, sizeof(data))) return point;
-  const uint8_t touches = data[0] & 0x0fU;
-  if (touches == 0) {
-    fingerDown = false;
+  if (!readRegisters(kTouchDataRegister, data, sizeof(data))) {
+    tracker.cancel();
     return point;
   }
-  if (fingerDown) return point;
-  fingerDown = true;
+  const uint8_t touches = data[0] & 0x0fU;
+  if (touches == 0) {
+    return tracker.update(false, 0, 0, now);
+  }
   point.x = static_cast<int16_t>(((data[1] & 0x0fU) << 8) | data[2]);
   point.y = static_cast<int16_t>(((data[3] & 0x0fU) << 8) | data[4]);
   // Both profiles use the same logical 240x240 controls and rotation zero.
-  if (point.x >= pins::kPanelSize || point.y >= pins::kPanelSize) return {};
+  if (touches != 1 || point.x >= pins::kPanelSize || point.y >= pins::kPanelSize) {
+    tracker.cancel(true);
+    return {};
+  }
   point.x = (point.x * 240) / pins::kPanelSize;
   point.y = (point.y * 240) / pins::kPanelSize;
-  point.valid = true;
-  return point;
+  return tracker.update(true, point.x, point.y, now);
 }
 
 }  // namespace round_ui::touch
@@ -122,7 +124,7 @@ Point poll(uint32_t now) {
 namespace round_ui::touch {
 bool begin() { return false; }
 bool ready() { return false; }
-Point poll(uint32_t) { return {}; }
+Gesture poll(uint32_t) { return {}; }
 }  // namespace round_ui::touch
 
 #endif

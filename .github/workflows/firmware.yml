@@ -1,0 +1,55 @@
+name: Firmware builds
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: pip install platformio==6.1.19
+      - name: Select and validate compiled version
+        run: |
+          python - <<'PY'
+          import os, re
+          from pathlib import Path
+          from tools.package_release import VERSION_PATTERN
+          header = Path('src/firmware_identity.h').read_text()
+          default = re.search(r'#define ADBLOCK_FW_VERSION "([^"]+)"', header).group(1)
+          tag = os.environ['GITHUB_REF_NAME']
+          version = tag[1:] if os.environ['GITHUB_REF_TYPE'] == 'tag' and tag.startswith('v') else default
+          if not re.fullmatch(VERSION_PATTERN, version):
+              raise SystemExit('Release tags must be vMAJOR.MINOR.PATCH')
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('ADBLOCK_FW_VERSION=' + version + '\n')
+          PY
+      - run: pio test -e native
+      - run: pio run -e c3 -e round-display -e s3-headless -e jc3636w518c
+      - run: python -m unittest discover -s tests -v
+      - run: node --test tests/test_dashboard_firmware.cjs
+      - run: python tools/package_release.py --version "$ADBLOCK_FW_VERSION"
+      - name: Include distribution licenses
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+          shutil.copy2('LICENSE', 'release/LICENSE')
+          shutil.copytree('licenses', 'release/licenses', dirs_exist_ok=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware-${{ github.sha }}
+          path: release/
+          if-no-files-found: error

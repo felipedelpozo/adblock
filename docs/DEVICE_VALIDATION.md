@@ -1,5 +1,5 @@
 # Device validation — 2026-10-03
-> This report describes the initial hardware bring-up. See `DASHBOARD_UI_VALIDATION.md` for the current dashboard/history/display revision and firmware hash.
+> This report describes the initial hardware bring-up. See `GITHUB_QR_VALIDATION.md` for the latest validated firmware revision; intermediate revisions have separate reports.
 
 Status: implementation, USB installation, live DNS/dashboard/HTTP OTA and persistence
 checks complete. The user confirmed the screen and all three touch controls on the device.
@@ -16,9 +16,8 @@ checks complete. The user confirmed the screen and all three touch controls on t
 
 ## Backup and preservation
 
-A complete **16,777,216-byte** pre-write flash backup is retained privately at:
-
-`/Users/felipedelpozo/Documents/Codex/2026-10-03/referenced-chatgpt-conversation-this-is-an/work/device-backup/original-flash.bin`
+A complete **16,777,216-byte** pre-write flash backup is retained privately
+outside the repository. Its local filesystem path is intentionally omitted.
 
 SHA-256: `0c924c6a8696a90ad0ebf6dd8f6f7bc483b9496bf169b3cb584672109e3632d8`.
 

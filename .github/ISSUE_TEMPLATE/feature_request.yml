@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest a focused improvement to ESP AdBlock Round.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private network data, flash dumps, or other sensitive material. Use the private security reporting path for vulnerabilities.
+  - type: input
+    id: profile
+    attributes:
+      label: Firmware profile
+      description: Which profile is affected, or say all profiles.
+      placeholder: all profiles
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Firmware version or commit
+      placeholder: v0.1.0 or abc1234
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: Board and display/touch model, if applicable. Sanitize private values.
+      placeholder: ESP32-2424S012C, GC9A01/CST816
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Explain the problem, expected behavior, and a sanitized example or reproduction.
+    validations:
+      required: true

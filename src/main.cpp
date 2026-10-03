@@ -27,6 +27,8 @@ static const char* WIFI_PASS = "";
 #include "blocking_state.h"
 #include "blocked_log.h"
 #include "ui.h"
+#include "firmware_identity.h"
+#include "github_updater.h"
 
 // ---- config ----
 static const IPAddress UPSTREAM(9, 9, 9, 9);     // Quad9
@@ -62,6 +64,7 @@ String updateUrl = "";              // URL of a prebuilt blocklist.bin (e.g. Git
 uint32_t updateIntervalH = 24;      // hours between auto-fetches
 uint32_t lastCheckMs = 0;
 String updateStatus = "never";
+String githubCsrfNonce;
 
 // WiFi provisioning (captive portal)
 Preferences prefs;
@@ -228,6 +231,11 @@ static void handleStats() {
              ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
              ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"" +
              ",\"blocking\":" + (blocking.active() ? "true" : "false") +
+             ",\"fwVersion\":\"" + jesc(String(firmware_identity::VERSION)) + "\",\"fwProfile\":\"" + firmware_identity::PROFILE +
+             "\",\"githubStatus\":\"" + jesc(githubUpdater.status()) + "\",\"githubVersion\":\"" + jesc(githubUpdater.availableVersion()) +
+             "\",\"githubBusy\":" + String(githubUpdater.busy() ? "true" : "false") +
+             ",\"githubCanInstall\":" + String(githubUpdater.canInstall() ? "true" : "false") +
+             ",\"githubProgress\":" + githubUpdater.progress() + ",\"githubNonce\":\"" + githubCsrfNonce + "\"" +
              ",\"resumeIn\":" + blocking.remainingSeconds(millis()) +
              ",\"clients\":[";
   for (int i = 0; i < numClients; i++) { Dev& c = clients[i]; IPAddress ip(c.ip);
@@ -337,24 +345,97 @@ static bool fetchBlocklist(String url) {
 }
 
 // ---------- firmware OTA (browser upload of firmware.bin -> reboot) ----------
+static bool fwUploadLocked = false;
+static bool fwUploadSucceeded = false;
+static bool fwUploadFailed = false;
+static bool fwUploadConflict = false;
+
 static void handleFwUpdateDone() {
-  bool ok = !Update.hasError();
-  web.send(ok ? 200 : 500, "text/plain", ok ? "ok, rebooting" : "firmware update failed");
+  const bool ok = fwUploadLocked && fwUploadSucceeded && !fwUploadFailed && Update.end(true);
+  web.send(ok ? 200 : (fwUploadConflict ? 409 : 400), "text/plain",
+           ok ? "ok, rebooting" : "firmware update failed or another OTA is active");
   if (ok) { delay(300); ESP.restart(); }
+  if (fwUploadLocked) {
+    Update.abort();
+    firmwareUpdateUnlock();
+    fwUploadLocked = false;
+  }
 }
+
 static void handleFwUpload() {
+  // WebServer invokes the same callback for raw POST bodies. upload() has
+  // no object in that case; accessing it would reboot on an empty/raw request.
+  String contentType = web.header("Content-Type");
+  contentType.toLowerCase();
+  if (!contentType.startsWith("multipart/form-data")) {
+    fwUploadFailed = true;
+    return;
+  }
   HTTPUpload& u = web.upload();
   if (u.status == UPLOAD_FILE_START) {
+    // Reject multiple file parts without replacing an already validated app.
+    if (fwUploadLocked) {
+      fwUploadFailed = true;
+      Update.abort();
+      return;
+    }
+    fwUploadSucceeded = fwUploadFailed = fwUploadConflict = false;
+    if (githubUpdater.busy() || !firmwareUpdateTryLock(0)) {
+      fwUploadConflict = true;
+      Serial.println("[fw-ota] rejected: another OTA is active");
+      return;
+    }
+    fwUploadLocked = true;
     Serial.printf("[fw-ota] %s\n", u.filename.c_str());
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      fwUploadFailed = true;
+      Update.printError(Serial);
+    }
   } else if (u.status == UPLOAD_FILE_WRITE) {
-    if (Update.write(u.buf, u.currentSize) != u.currentSize) Update.printError(Serial);
+    if (!fwUploadLocked || fwUploadFailed) return;
+    if (Update.write(u.buf, u.currentSize) != u.currentSize) {
+      fwUploadFailed = true;
+      Update.printError(Serial);
+    }
   } else if (u.status == UPLOAD_FILE_END) {
-    if (Update.end(true)) Serial.printf("[fw-ota] %u bytes OK\n", u.totalSize);
-    else Update.printError(Serial);
+    if (!fwUploadLocked || fwUploadFailed) return;
+    // Activate only in the completion callback, after the entire multipart
+    // request has been accepted. A later malformed file part must not activate.
+    fwUploadSucceeded = u.totalSize > 0 && !Update.hasError();
+    if (fwUploadSucceeded) Serial.printf("[fw-ota] %u bytes received\n", u.totalSize);
+    else { fwUploadFailed = true; Update.printError(Serial); }
   } else if (u.status == UPLOAD_FILE_ABORTED) {
-    Update.abort(); Serial.println("[fw-ota] aborted");
+    if (fwUploadLocked) { Update.abort(); firmwareUpdateUnlock(); fwUploadLocked = false; }
+    fwUploadSucceeded = false;
+    Serial.println("[fw-ota] aborted");
   }
+}
+
+static bool validGithubOrigin() {
+  const String origin = web.header("Origin");
+  if (!origin.length()) return false;
+  return origin == "http://c3adblock.local" || origin == (String("http://") + WiFi.localIP().toString());
+}
+
+static bool authorizeGithubRequest() {
+  if (!validGithubOrigin() || web.header("X-CSRF-Token") != githubCsrfNonce) {
+    web.send(403, "text/plain", "csrf rejected"); return false;
+  }
+  return true;
+}
+
+static void handleGithubCheck() {
+  if (!authorizeGithubRequest()) return;
+  if (!githubUpdater.requestCheck()) { web.send(409, "text/plain", "updater busy or unavailable"); return; }
+  web.send(202, "text/plain", "update check started");
+}
+
+static void handleGithubInstall() {
+  if (!authorizeGithubRequest()) return;
+  if (!githubUpdater.requestInstall(web.arg("v"))) {
+    web.send(409, "text/plain", "check a compatible release first or updater busy"); return;
+  }
+  web.send(202, "text/plain", "installation started");
 }
 
 // Display and web controls share the same volatile pause state.
@@ -464,6 +545,7 @@ void setup() {
   Serial.printf("\n[adblock] booting chip=%s flash=%lu psram=%lu\n",
       ESP.getChipModel(), static_cast<unsigned long>(ESP.getFlashChipSize()),
       static_cast<unsigned long>(ESP.getPsramSize()));
+  Serial.printf("[firmware] %s\n", firmware_identity::MARKER);
   // Never auto-format: an incompatible/missing filesystem must preserve user data.
   if (!LittleFS.begin(false)) Serial.println("[fs] mount failed; data preserved (no format)");
   round_ui::begin();
@@ -501,6 +583,8 @@ void setup() {
     prefs.begin("wifi", false); prefs.clear(); prefs.end(); delay(500); ESP.restart(); });
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);      // blocklist OTA
   web.on("/update", HTTP_POST, handleFwUpdateDone, handleFwUpload);  // firmware OTA
+  web.on("/github/install", HTTP_POST, handleGithubInstall);
+  web.on("/github/check", HTTP_POST, handleGithubCheck);
   web.on("/fetchnow", []() { fetchBlocklist(updateUrl); web.send(200, "text/plain", updateStatus); });
   web.on("/setupdate", []() {
     if (web.hasArg("u")) updateUrl = web.arg("u");
@@ -508,6 +592,10 @@ void setup() {
     saveUpdateCfg(); web.send(200, "text/plain", "ok");
   });
   web.begin();
+  const char* requestHeaders[] = {"Origin", "X-CSRF-Token", "Content-Type"};
+  web.collectHeaders(requestHeaders, 3);
+  githubCsrfNonce = githubUpdater.nonce();
+  githubUpdater.begin();
   ArduinoOTA.setHostname("c3adblock");   // pio run -t upload --upload-port c3adblock.local
   ArduinoOTA.begin();
   Serial.println("DNS :53 + dashboard :80 + OTA up");
@@ -515,7 +603,12 @@ void setup() {
 
 void loop() {
   blocking.tick(millis());
-  ArduinoOTA.handle();
+  // ArduinoOTA calls Update.begin before its onStart callback. Guard the
+  // complete handle call, so it can never alter a GitHub upload in progress.
+  if (firmwareUpdateTryLock(0)) {
+    ArduinoOTA.handle();
+    firmwareUpdateUnlock();
+  }
   web.handleClient();
   bool busy = handleDns();
   if (updateUrl.length()) {               // periodic remote blocklist auto-update
