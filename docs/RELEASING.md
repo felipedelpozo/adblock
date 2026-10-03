@@ -26,16 +26,18 @@ node --test tests/test_dashboard_firmware.cjs
 python tools/package_release.py --version 0.1.1 --output release
 ```
 
-`0.1.1` above is an example, not a published version. When running locally,
-include `LICENSE` and `licenses/` with a distributed binary archive. CI copies
-them into its release artifact automatically.
+For release `0.1.1`, the commands above select the exact stable version that
+must be embedded in every image and repeated by the package manifest. Include
+`LICENSE` and `licenses/` with a distributed binary archive. CI copies them
+into its release artifact automatically. The hosted workflow for the matching
+`v0.1.1` tag remains the final build and package evidence before publication.
 
 ## Publish and verify
 
 1. Commit the reviewed source and changelog, push `main`, and inspect the first
    GitHub Actions run. Local checks do not prove the hosted workflow passed.
-2. Create the matching stable tag, for example `v0.1.1`, on the reviewed commit.
-   Wait for its firmware workflow; download and review the artifact.
+2. Create the matching stable tag `v0.1.1` on the reviewed commit. Wait for
+   its firmware workflow; download and review the artifact.
 3. Create a public, stable GitHub Release at that tag. Attach the six required
    files from the artifact: `manifest.json`, `SHA256SUMS` and all four
    `firmware-PROFILE.bin` files. Include license notices with binary distributions

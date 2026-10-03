@@ -391,8 +391,9 @@ void drawDashboardQr() {
     }
   }
   textCentered(paint.ip, 120, 183, kInk, 1);
-  textCentered("CONECTA A LA MISMA WIFI", 120, 199, kMuted, 1);
-  textCentered("TOCA PARA VOLVER", 120, 215, kMuted, 1);
+  // Keep both hints inside the narrow lower edge of the round 360px panel.
+  textCentered("USA LA MISMA WIFI", 120, 199, kMuted, 1);
+  textCentered("TOCA O DESLIZA", 120, 215, kMuted, 1);
 }
 
 void drawControlButton(int32_t x, int32_t y, int32_t width, int32_t height, const char* label,

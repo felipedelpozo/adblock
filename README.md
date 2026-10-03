@@ -1,11 +1,16 @@
-# ESP AdBlock Round
+# ESP AdBlock Round — ESP32 & ESP32-S3 DNS Ad Blocker
 
 [![Firmware builds](https://github.com/felipedelpozo/adblock/actions/workflows/firmware.yml/badge.svg)](https://github.com/felipedelpozo/adblock/actions/workflows/firmware.yml)
+[![GitHub release](https://img.shields.io/github/v/release/felipedelpozo/adblock)](https://github.com/felipedelpozo/adblock/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A small network DNS ad blocker with a local web dashboard and optional round
-touchscreen. Pause blocking, inspect recent blocked queries, scan a dashboard
-QR and update firmware from GitHub Releases without replacing saved settings.
+An open-source **ESP32 DNS sinkhole** for network ad and tracker blocking, with
+a local web dashboard and optional round touchscreen. Run it on an ESP32-C3
+or ESP32-S3, point a device's DNS at it, and manage blocking from your browser.
+
+**[Download v0.1.1](https://github.com/felipedelpozo/adblock/releases/tag/v0.1.1)**
+· [Setup](#getting-started) · [Hardware & pinout](#hardware-profiles)
+· [Firmware updates](#ota-and-persistent-updates) · [FAQ](#faq)
 
 An adaptation of [M-Abozaid/esp32-c3-adblock](https://github.com/M-Abozaid/esp32-c3-adblock)
 (upstream `c56456ac535844d9eecd6cfee030a2e23dc797d1`). The same DNS sinkhole,
@@ -20,6 +25,42 @@ display profile are also supported. Select the exact hardware profile below.
 DNS blocking reduces ads and tracking but cannot reliably remove YouTube ads
 served from the same domains as video. Administration is intended for a trusted
 LAN; see [security and limitations](SECURITY.md).
+
+## Features
+
+- **DNS ad blocking:** flash-based domain hashes, parent-domain matching,
+  custom domain rules and persistent client bans.
+- **Local dashboard:** live counters, observed clients and a searchable history
+  of the last 64 blocked queries; no cloud account or external web assets.
+- **Round touch UI:** five swipe pages for status, activity, lists, network and
+  controls; pause for 5/30 minutes or resume, and scan a local dashboard QR.
+- **Verified GitHub OTA:** confirm a compatible release, then verify HTTPS,
+  image size, SHA-256 and embedded board/profile/version identity before reboot.
+- **Low-memory display:** LovyanGFX, incremental 8-row stripes and no full-screen
+  framebuffer; Wi-Fi provisioning uses a captive portal.
+- **One codebase:** headless C3/S3, GC9A01 240×240 and ST77916 QSPI 360×360 profiles.
+
+## Screenshots
+
+### Round display
+
+![ESP32-S3 round touchscreen UI: status, DNS blocking statistics, domain lists, Wi-Fi network, pause controls and dashboard QR](docs/images/display-pages.png)
+
+360×360 display views generated from the firmware drawing code with example
+data. See [display preview provenance](docs/images/DISPLAY_PREVIEWS.md) for the
+host-rendering method and physical-panel differences.
+
+### Web dashboard and blocked-query history
+
+![ESP32 DNS ad blocker dashboard with active blocking, counters, Wi-Fi status and searchable blocked-query history](docs/images/dashboard-overview.jpg)
+
+### Firmware updates from GitHub Releases
+
+![ESP32 GitHub OTA dashboard offering version 0.1.1 with manual upload and blocklist update controls](docs/images/dashboard-updates.jpg)
+
+Dashboard images are browser captures of the firmware HTML served with
+synthetic data: addresses, counters and history entries are examples.
+[Reproduce the captures](docs/images/README.md).
 
 ## Getting started
 
@@ -40,8 +81,11 @@ git clone https://github.com/felipedelpozo/adblock.git
 cd adblock
 ```
 
-Firmware binaries belong in [Releases](https://github.com/felipedelpozo/adblock/releases),
-not in the source tree. Until a release is published, build from source.
+Application binaries are available in
+[Releases](https://github.com/felipedelpozo/adblock/releases). Choose the exact
+hardware profile; these files are **application-only OTA images**. A first
+installation requires the source build, compatible partition layout and
+separate blocklist setup described below.
 
 ## Hardware profiles
 
@@ -287,3 +331,42 @@ in [licenses/NOTICE.md](licenses/NOTICE.md).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md) and the
 [release checklist](docs/RELEASING.md) for development and maintenance.
+
+## FAQ
+
+### Is this an ESP32 alternative to Pi-hole?
+
+It provides Pi-hole-style DNS sinkhole blocking on a microcontroller, with
+fewer features and less capacity than a Raspberry Pi/server deployment. It
+uses the original ESP32 AdBlock engine; it is an independent project.
+
+### Does it block YouTube ads?
+
+DNS filtering cannot distinguish ads from videos served on the same domain.
+Blocking such domains can break playback. Use a browser/content blocker where
+DNS filtering is insufficient.
+
+### Will it protect every device on my network?
+
+Only clients that use this device as their DNS resolver are filtered. Router
+DHCP DNS settings are a convenient way to distribute its reserved IP. Public
+secondary DNS, browser DNS-over-HTTPS, VPN resolvers and separate IPv6 DNS can
+bypass it. Start with one client before changing router settings.
+
+### Does it need a cloud service or PSRAM?
+
+Administration is local. The C3 profiles run with 4 MB flash and no PSRAM; the
+tested JC3636W518C has 16 MB flash and 8 MB PSRAM. Blocklist downloads and GitHub
+firmware updates use the Internet when requested/configured.
+
+### Can firmware updates erase my Wi-Fi or blocklist?
+
+Compatible application-only OTA updates preserve NVS and LittleFS. A full
+flash erase, changed partition layout or filesystem upload can replace saved
+data; back up before a first USB installation or migration.
+
+### What hardware has been physically tested?
+
+The Guition **JC3636W518C** with **ST77916** display and **CST816** touch. The
+ESP32-C3 headless/GC9A01 profiles are compile-verified; see the validation
+reports for the exact scope of device and QR checks.

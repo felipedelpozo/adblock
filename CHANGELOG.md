@@ -1,8 +1,20 @@
 # Changelog
 
 Changes to this adaptation are recorded here. The upstream project history
-remains in Git. Firmware version `0.1.0` is the current local development
-identity; no GitHub release has been published yet.
+remains in Git.
+
+## 0.1.1 - 2026-10-03
+
+- Prepare the first public firmware release with a stable `0.1.1` identity
+  across the C3, round-display, S3-headless and JC3636W518C profiles.
+- Publish the manifest, checksums and application-only OTA images through the
+  GitHub Release update contract, with third-party notices included alongside
+  distributed binaries.
+- Keep the dashboard QR instructions inside the round display's narrow lower
+  edge by shortening the Wi-Fi and return captions; the QR itself remains
+  unchanged.
+- Document the tested ESP32-S3 hardware path and the C3 compile-only profile;
+  physical installation and optical QR scanning remain device-validation work.
 
 ## Unreleased
 

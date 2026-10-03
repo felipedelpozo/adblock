@@ -1,0 +1,497 @@
+#!/usr/bin/env python3
+"""Render source-derived round-display previews with a tiny host LovyanGFX shim.
+
+The firmware has no framebuffer readback path.  This tool therefore copies the
+unchanged display renderer into a temporary build directory, supplies only the
+Arduino/LovyanGFX surface needed by that renderer, and writes RGB565 output as
+PNG after applying the physical circular-panel mask.  It never selects or
+modifies a PlatformIO firmware environment.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import zlib
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+OUT = ROOT / "docs" / "images"
+LGFX_SRC = ROOT / ".pio" / "libdeps" / "jc3636w518c" / "LovyanGFX" / "src"
+
+SCENARIOS = (
+    ("status", "Status - active", "Status page"),
+    ("activity", "Activity - blocked", "Activity page"),
+    ("lists", "Lists - 99.6K", "Lists page"),
+    ("network", "Network - Wi-Fi", "Network page"),
+    ("controls-paused", "Controls - paused", "Controls page with resume"),
+    ("dashboard-qr", "Dashboard QR - 192.168.1.50", "Dashboard QR modal"),
+)
+
+ARDUINO_H = r'''#pragma once
+#include <cstdint>
+#include <cstdio>
+#define PROGMEM
+#define OUTPUT 1
+#define HIGH 1
+#define LOW 0
+inline void pinMode(int, int) {}
+inline void digitalWrite(int, int) {}
+// Deterministic monotonic clock stub for the renderer; values are not timing
+// measurements and must not be read as host or hardware performance evidence.
+inline uint32_t micros() { static uint32_t tick = 0; return tick += 37; }
+struct EspHost { uint32_t getFreeHeap() const { return 123456; } };
+struct SerialHost {
+  template <typename... Args> void printf(const char* format, Args... args) {
+    std::fprintf(stderr, format, args...);
+  }
+};
+inline EspHost ESP;
+inline SerialHost Serial;
+'''
+
+LGFX_H = r'''#pragma once
+#include <Arduino.h>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <lgfx/Fonts/glcdfont.h>
+
+namespace lgfx {
+
+class LGFX_Device;
+namespace host {
+inline LGFX_Device* active = nullptr;
+inline LGFX_Device* device() { return active; }
+}
+
+class LGFX_Device {
+ public:
+  static constexpr int kWidth = 360;
+  static constexpr int kHeight = 360;
+  LGFX_Device() : pixels_(kWidth * kHeight, 0) { host::active = this; }
+  bool init() { return true; }
+  void setRotation(uint8_t) {}
+  void setColorDepth(uint8_t) {}
+  void setTextColor(uint16_t color) { text_color_ = color; }
+  void setTextSize(uint8_t size) { text_size_ = std::max<uint8_t>(1, size); }
+  void setClipRect(int32_t x, int32_t y, int32_t w, int32_t h) {
+    clip_x_ = x; clip_y_ = y; clip_w_ = w; clip_h_ = h; clip_enabled_ = true;
+  }
+  void clearClipRect() { clip_enabled_ = false; }
+  void fillScreen(uint16_t color) { fillRect(0, 0, kWidth, kHeight, color); }
+  void fillRect(int32_t x, int32_t y, int32_t w, int32_t h, uint16_t color) {
+    int32_t left = std::max<int32_t>(0, x), top = std::max<int32_t>(0, y);
+    int32_t right = std::min<int32_t>(kWidth, x + w), bottom = std::min<int32_t>(kHeight, y + h);
+    if (clip_enabled_) {
+      left = std::max(left, clip_x_); top = std::max(top, clip_y_);
+      right = std::min(right, clip_x_ + clip_w_); bottom = std::min(bottom, clip_y_ + clip_h_);
+    }
+    for (int32_t py = top; py < bottom; ++py)
+      for (int32_t px = left; px < right; ++px) pixels_[py * kWidth + px] = color;
+  }
+  void fillRoundRect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint16_t color) {
+    drawRounded(x, y, w, h, r, color, false);
+  }
+  void drawRoundRect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint16_t color) {
+    drawRounded(x, y, w, h, r, color, true);
+  }
+  void fillCircle(int32_t cx, int32_t cy, int32_t r, uint16_t color) {
+    for (int32_t y = cy - r; y <= cy + r; ++y)
+      for (int32_t x = cx - r; x <= cx + r; ++x)
+        if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r) put(x, y, color);
+  }
+  void drawLine(int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint16_t color) {
+    int32_t dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int32_t dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int32_t err = dx + dy;
+    for (;;) {
+      put(x0, y0, color);
+      if (x0 == x1 && y0 == y1) break;
+      const int32_t twice = 2 * err;
+      if (twice >= dy) { err += dy; x0 += sx; }
+      if (twice <= dx) { err += dx; y0 += sy; }
+    }
+  }
+  size_t drawString(const char* value, int32_t x, int32_t y) {
+    if (!value) return 0;
+    int32_t cursor = x;
+    for (const unsigned char* c = reinterpret_cast<const unsigned char*>(value); *c; ++c) {
+      drawGlyph(*c, cursor, y);
+      cursor += 6 * text_size_;
+    }
+    return static_cast<size_t>(cursor - x);
+  }
+  const std::vector<uint16_t>& pixels() const { return pixels_; }
+  static uint8_t red(uint16_t c) { return static_cast<uint8_t>(((c >> 11) & 31) * 255 / 31); }
+  static uint8_t green(uint16_t c) { return static_cast<uint8_t>(((c >> 5) & 63) * 255 / 63); }
+  static uint8_t blue(uint16_t c) { return static_cast<uint8_t>((c & 31) * 255 / 31); }
+  bool writePpm(const std::string& path) const {
+    std::ofstream output(path, std::ios::binary);
+    if (!output) return false;
+    output << "P6\n" << kWidth << " " << kHeight << "\n255\n";
+    for (uint16_t c : pixels_) {
+      const char rgb[3] = {static_cast<char>(red(c)), static_cast<char>(green(c)), static_cast<char>(blue(c))};
+      output.write(rgb, sizeof(rgb));
+    }
+    return static_cast<bool>(output);
+  }
+
+ private:
+  bool visible(int32_t x, int32_t y) const {
+    return x >= 0 && y >= 0 && x < kWidth && y < kHeight &&
+           (!clip_enabled_ || (x >= clip_x_ && y >= clip_y_ && x < clip_x_ + clip_w_ && y < clip_y_ + clip_h_));
+  }
+  void put(int32_t x, int32_t y, uint16_t color) { if (visible(x, y)) pixels_[y * kWidth + x] = color; }
+  static bool roundedInside(int32_t px, int32_t py, int32_t x, int32_t y, int32_t w, int32_t h, int32_t r) {
+    if (r <= 0) return px >= x && px < x + w && py >= y && py < y + h;
+    const int32_t rx = std::min(r, w / 2), ry = std::min(r, h / 2);
+    const int32_t cx = px < x + rx ? x + rx : (px >= x + w - rx ? x + w - rx - 1 : px);
+    const int32_t cy = py < y + ry ? y + ry : (py >= y + h - ry ? y + h - ry - 1 : py);
+    return (px - cx) * (px - cx) + (py - cy) * (py - cy) <= r * r;
+  }
+  void drawRounded(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint16_t color, bool outline) {
+    for (int32_t py = y; py < y + h; ++py) for (int32_t px = x; px < x + w; ++px) {
+      if (!roundedInside(px, py, x, y, w, h, r)) continue;
+      if (outline && roundedInside(px, py, x + 1, y + 1, w - 2, h - 2, std::max(0, r - 1))) continue;
+      put(px, py, color);
+    }
+  }
+  void drawGlyph(unsigned char ch, int32_t x, int32_t y) {
+    if (ch > 127) ch = '?';
+    for (int col = 0; col < 5; ++col) {
+      const uint8_t bits = font[ch * 5 + col];
+      for (int row = 0; row < 8; ++row) if (bits & (1U << row))
+        for (uint8_t sy = 0; sy < text_size_; ++sy) for (uint8_t sx = 0; sx < text_size_; ++sx)
+          put(x + col * text_size_ + sx, y + row * text_size_ + sy, text_color_);
+    }
+  }
+  std::vector<uint16_t> pixels_;
+  uint16_t text_color_ = 0xffff;
+  uint8_t text_size_ = 1;
+  bool clip_enabled_ = false;
+  int32_t clip_x_ = 0, clip_y_ = 0, clip_w_ = kWidth, clip_h_ = kHeight;
+};
+
+namespace host {
+inline const std::vector<uint16_t>& pixels() { return active->pixels(); }
+inline bool writePpm(const std::string& path) { return active && active->writePpm(path); }
+}
+}  // namespace lgfx
+'''
+
+ST77916_H = r'''#pragma once
+#include <LovyanGFX.hpp>
+class RoundDisplayS3 final : public lgfx::LGFX_Device {};
+'''
+
+RUNNER_CPP = r'''#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include "display.h"
+#include "display_qr.h"
+#include "ui_model.h"
+#include <LovyanGFX.hpp>
+
+static round_ui::Page pageFor(const char* name) {
+  if (std::strcmp(name, "activity") == 0) return round_ui::Page::Activity;
+  if (std::strcmp(name, "lists") == 0) return round_ui::Page::Lists;
+  if (std::strcmp(name, "network") == 0 || std::strcmp(name, "dashboard-qr") == 0) return round_ui::Page::Network;
+  if (std::strcmp(name, "controls-paused") == 0) return round_ui::Page::Controls;
+  return round_ui::Page::Status;
+}
+
+int main(int argc, char** argv) {
+  if (argc != 3) return 2;
+  const char* scenario = argv[1];
+  round_ui::Snapshot snapshot;
+  snapshot.blocking = true; snapshot.connected = true; snapshot.portal = false;
+  snapshot.blocked = 132684; snapshot.allowed = 45123; snapshot.domains = 99643;
+  snapshot.customDomains = 12; snapshot.resumeSeconds = 0; snapshot.clients = 3;
+  snapshot.rssi = -52;
+  std::snprintf(snapshot.ip, sizeof(snapshot.ip), "%s", "192.168.1.50");
+  std::snprintf(snapshot.ap, sizeof(snapshot.ap), "%s", "C3-ADBLOCK");
+  if (std::strcmp(scenario, "controls-paused") == 0) { snapshot.blocking = false; snapshot.resumeSeconds = 298; }
+
+  if (!round_ui::display::begin()) return 3;
+  round_ui::display::setSnapshot(snapshot);
+  round_ui::display::setPage(pageFor(scenario));
+  if (std::strcmp(scenario, "dashboard-qr") == 0) round_ui::display::setDashboardQr(true);
+  unsigned guard = 0;
+  while (round_ui::display::renderOneRegion(guard++) && guard < 2000) {}
+  if (!round_ui::display::pageReady()) return 4;
+  if (!lgfx::host::writePpm(argv[2])) return 5;
+  if (std::strcmp(scenario, "dashboard-qr") == 0) {
+    std::ofstream matrix(std::string(argv[2]) + ".matrix");
+    if (!round_ui::display_qr::available()) return 6;
+    for (int y = 0; y < round_ui::display_qr::kSize; ++y) {
+      for (int x = 0; x < round_ui::display_qr::kSize; ++x) matrix << (round_ui::display_qr::dark(x, y) ? '#' : '.');
+      matrix << '\n';
+    }
+  }
+  std::fprintf(stdout, "scenario=%s renders=%u ready=%s host_stub_clock_ticks=%u\n", scenario, guard,
+               round_ui::display::pageReady() ? "yes" : "no", round_ui::display::maxRenderMicros());
+  return 0;
+}
+'''
+
+
+def run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(command, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        sys.stderr.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        raise RuntimeError(f"command failed ({result.returncode}): {' '.join(command)}")
+    return result
+
+
+def png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+
+
+def write_png(path: Path, width: int, height: int, pixels: bytes) -> None:
+    rows = b"".join(b"\0" + pixels[y * width * 3:(y + 1) * width * 3] for y in range(height))
+    payload = b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    payload += png_chunk(b"IDAT", zlib.compress(rows, 9)) + png_chunk(b"IEND", b"")
+    path.write_bytes(payload)
+
+
+def read_ppm(path: Path) -> tuple[int, int, bytes]:
+    data = path.read_bytes()
+    if not data.startswith(b"P6\n"):
+        raise RuntimeError(f"unexpected PPM header: {path}")
+    header_end = data.find(b"\n255\n", 3)
+    if header_end < 0:
+        raise RuntimeError(f"missing PPM dimensions: {path}")
+    dimensions = data[3:header_end].split()
+    width, height = map(int, dimensions)
+    pixels = data[header_end + len(b"\n255\n"):]
+    if len(pixels) != width * height * 3:
+        raise RuntimeError(f"truncated PPM: {path}")
+    return width, height, pixels
+
+
+def circularize(width: int, height: int, pixels: bytes) -> bytes:
+    neutral = (237, 240, 239)
+    output = bytearray(pixels)
+    cx, cy = (width - 1) / 2.0, (height - 1) / 2.0
+    radius = min(width, height) / 2.0 - 0.5
+    for y in range(height):
+        for x in range(width):
+            if (x - cx) ** 2 + (y - cy) ** 2 > radius ** 2:
+                offset = (y * width + x) * 3
+                output[offset:offset + 3] = bytes(neutral)
+    return bytes(output)
+
+
+def load_font() -> list[int]:
+    text = (LGFX_SRC / "lgfx" / "Fonts" / "glcdfont.h").read_text(encoding="utf-8")
+    body = re.search(r"static const unsigned char font\[\].*?= \{(.*?)\};", text, re.S)
+    if not body:
+        raise RuntimeError("could not read LovyanGFX glcdfont.h")
+    values = [int(token, 16) for token in re.findall(r"0x([0-9A-Fa-f]{2})", body.group(1))]
+    if len(values) < 128 * 5:
+        raise RuntimeError(f"unexpected glcdfont length: {len(values)}")
+    return values
+
+
+def draw_caption(canvas: bytearray, width: int, x: int, y: int, value: str, font: list[int]) -> None:
+    # One bitmap-font pixel is kept at 1x so the montage caption stays quiet.
+    start = x - (len(value) * 6) // 2
+    for index, char in enumerate(value.encode("ascii", "replace")):
+        glyph = min(char, 127) * 5
+        for col in range(5):
+            bits = font[glyph + col]
+            for row in range(8):
+                if bits & (1 << row):
+                    px, py = start + index * 6 + col, y + row
+                    if 0 <= px < width and 0 <= py < 768:
+                        offset = (py * width + px) * 3
+                        canvas[offset:offset + 3] = b"\x10\x2b\x34"
+
+
+def make_montage(images: list[tuple[str, bytes]], path: Path) -> None:
+    width, cell_h = 1080, 384
+    height = cell_h * 2
+    canvas = bytearray(bytes((242, 244, 243)) * (width * height))
+    font = load_font()
+    for index, (caption, pixels) in enumerate(images):
+        col, row = index % 3, index // 3
+        ox, oy = col * 360, row * cell_h
+        for y in range(360):
+            start = (y * 360) * 3
+            destination = ((oy + y) * width + ox) * 3
+            canvas[destination:destination + 360 * 3] = pixels[start:start + 360 * 3]
+        draw_caption(canvas, width, ox + 180, oy + 366, caption, font)
+    write_png(path, width, height, bytes(canvas))
+
+
+def verify_qr_matrix(path: Path) -> tuple[int, bool]:
+    rows = path.read_text(encoding="ascii").splitlines()
+    if len(rows) != 25 or any(len(row) != 25 or set(row) - {".", "#"} for row in rows):
+        raise RuntimeError("QR matrix sidecar is not a 25x25 module matrix")
+    dark = sum(row.count("#") for row in rows)
+    # Version 2 has three 7x7 finder patterns. Check their corners and quiet structure.
+    for ox, oy in ((0, 0), (18, 0), (0, 18)):
+        if rows[oy][ox] != "#" or rows[oy + 6][ox + 6] != "#" or rows[oy + 3][ox + 3] != "#":
+            raise RuntimeError(f"QR finder pattern failed at ({ox},{oy})")
+    return dark, True
+
+
+def verify_qr_caption_containment(width: int, height: int, pixels: bytes) -> tuple[int, int]:
+    """Confirm both lower QR captions survive the circular panel mask.
+
+    At y>=298 the QR renderer has only the two instructional captions. The
+    host RGB565 shim expands the source background to (0, 12, 16), so any
+    other pixel in these two source regions is caption ink. This deliberately
+    checks the unmasked source framebuffer against the physical circle.
+    """
+    if (width, height) != (360, 360):
+        raise RuntimeError("QR caption check requires a 360x360 source render")
+    center = (width - 1) / 2.0
+    radius = min(width, height) / 2.0 - 0.5
+    background = (0, 12, 16)
+    total = outside = 0
+    for y0, y1 in ((298, 322), (322, 346)):
+        line_pixels = 0
+        for y in range(y0, y1):
+            for x in range(width):
+                offset = (y * width + x) * 3
+                if tuple(pixels[offset:offset + 3]) == background:
+                    continue
+                line_pixels += 1
+                total += 1
+                if (x - center) ** 2 + (y - center) ** 2 > radius ** 2:
+                    outside += 1
+        if line_pixels == 0:
+            raise RuntimeError(f"QR caption region {y0}:{y1} contains no source pixels")
+    if outside:
+        raise RuntimeError(f"QR captions lose {outside} source pixels beyond the circular mask")
+    return total, outside
+
+
+def compile_host(build: Path) -> Path:
+    files = ("display.cpp", "display.h", "display_qr.cpp", "display_qr.h", "ui_model.h", "touch_model.h", "dashboard_link.h")
+    for name in files:
+        shutil.copy2(SRC / name, build / name)
+    (build / "Arduino.h").write_text(ARDUINO_H, encoding="utf-8")
+    (build / "LovyanGFX.hpp").write_text(LGFX_H, encoding="utf-8")
+    (build / "st77916_qspi.h").write_text(ST77916_H, encoding="utf-8")
+    (build / "runner.cpp").write_text(RUNNER_CPP, encoding="utf-8")
+    qr_c = LGFX_SRC / "lgfx" / "utility" / "lgfx_qrcode.c"
+    qr_obj = build / "lgfx_qrcode.o"
+    run(["clang", "-std=c11", "-I", str(LGFX_SRC), "-c", str(qr_c), "-o", str(qr_obj)], cwd=build)
+    binary = build / "display_preview_host"
+    run(["clang++", "-std=c++17", "-DROUND_DISPLAY", "-DROUND_DISPLAY_S3", "-I", str(build), "-I", str(LGFX_SRC),
+         str(build / "display.cpp"), str(build / "display_qr.cpp"), str(build / "runner.cpp"), str(qr_obj), "-o", str(binary)], cwd=build)
+    return binary
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--keep-build", action="store_true", help="keep the temporary host build directory")
+    args = parser.parse_args()
+    if not LGFX_SRC.exists():
+        raise RuntimeError(f"LovyanGFX checkout is missing: {LGFX_SRC}")
+    OUT.mkdir(parents=True, exist_ok=True)
+    build_context = tempfile.TemporaryDirectory(prefix="adblock-display-preview-")
+    build = Path(build_context.name)
+    try:
+        binary = compile_host(build)
+        rendered: list[tuple[str, bytes]] = []
+        evidence: list[str] = []
+        for slug, caption, _ in SCENARIOS:
+            ppm = build / f"{slug}.ppm"
+            result = run([str(binary), slug, str(ppm)], cwd=build)
+            line = result.stdout.strip()
+            evidence.append(line)
+            width, height, raw = read_ppm(ppm)
+            if (width, height) != (360, 360):
+                raise RuntimeError(f"{slug}: expected 360x360, got {width}x{height}")
+            png_pixels = circularize(width, height, raw)
+            target = OUT / f"display-{slug}.png"
+            write_png(target, width, height, png_pixels)
+            rendered.append((caption, png_pixels))
+            if slug == "dashboard-qr":
+                dark, _ = verify_qr_matrix(Path(str(ppm) + ".matrix"))
+                if dark <= 180:
+                    raise RuntimeError(f"QR matrix has unexpectedly few dark modules: {dark}")
+                evidence.append(f"qr_matrix=25x25 dark_modules={dark} url=http://192.168.1.50/")
+                caption_pixels, outside = verify_qr_caption_containment(width, height, raw)
+                evidence.append(f"qr_caption_pixels={caption_pixels} outside_circle={outside}")
+        make_montage(rendered, OUT / "display-pages.png")
+        (OUT / "DISPLAY_PREVIEWS.md").write_text(rendering_notes(evidence), encoding="utf-8")
+        print("Generated:")
+        for slug, _, _ in SCENARIOS:
+            print(f"  {OUT / f'display-{slug}.png'}")
+        print(f"  {OUT / 'display-pages.png'}")
+        print("Evidence:")
+        for line in evidence:
+            print(f"  {line}")
+        if args.keep_build:
+            kept = ROOT / "tools" / "display_preview_build"
+            if kept.exists(): shutil.rmtree(kept)
+            shutil.copytree(build, kept)
+            print(f"Kept host build: {kept}")
+    finally:
+        build_context.cleanup()
+    return 0
+
+
+def rendering_notes(evidence: list[str]) -> str:
+    return """# Round display previews
+
+These previews are deterministic host renders of the repository's actual round
+display renderer. The tool copies `src/display.cpp`, `src/display_qr.cpp`, and
+their model headers into a temporary directory, compiles them unchanged with a
+small Arduino/LovyanGFX drawing shim, and uses the bundled LovyanGFX
+`glcdfont.h` bitmap font and `lgfx_qrcode.c` encoder. Rendering still follows
+the firmware's 240 px logical geometry, 360 px S3 scaling, 8 px clipped stripes,
+palette, controls, and QR layout.
+
+The six source pages use one explicit demonstration snapshot: 99,643 loaded
+domains, 132,684 blocked requests, 45,123 allowed requests, 3 clients, -52 dBm,
+and `192.168.1.50`. The controls page is intentionally paused with 298 seconds
+remaining so the resume control is visible. The QR page encodes exactly
+`http://192.168.1.50/` through the same C encoder used by firmware. These values
+are demonstration data and are not a device telemetry capture.
+
+There is no framebuffer or readback path on the hardware, so these files are
+host-rendered source previews, not photographs or optical panel captures. The
+host shim reproduces RGB565 primitives and bitmap glyphs; physical panel
+controller timing, electrical artifacts, touch response, and optical appearance
+remain unrepresented. The outside of each 360 px canvas is masked to a neutral
+background to show the circular panel boundary.
+
+The two QR instructional captions are checked directly in the unmasked source
+framebuffer: both regions contain rendered glyph pixels and the containment
+check confirms that zero caption pixels fall outside the circular panel.
+
+Regenerate from the repository root with:
+
+```sh
+python3 tools/render_display_previews.py
+```
+
+Verification output from the generation run:
+
+""" + "\n".join(f"- `{line}`" for line in evidence) + "\n"
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (RuntimeError, OSError) as error:
+        print(f"render_display_previews.py: {error}", file=sys.stderr)
+        raise SystemExit(1)
