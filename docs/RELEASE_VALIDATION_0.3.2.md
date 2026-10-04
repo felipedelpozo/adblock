@@ -2,7 +2,9 @@
 
 Recorded on 2026-10-04 for the `v0.3.2` source and four application-only OTA
 images. The release includes the Adagotchi Phase 1 engine, dashboard pet
-customization and the contracted-pose playback correction.
+customization and the contracted-pose playback correction. The published
+images are the byte-verified artifacts from the hosted tag workflow
+[37236096096](https://github.com/felipedelpozo/adblock/actions/runs/37236096096).
 
 ## Regression and build gates
 
@@ -17,10 +19,10 @@ manifest SHA-256 values.
 
 | Profile | Static RAM | Application bytes | OTA slot | Remaining bytes |
 | --- | ---: | ---: | ---: | ---: |
-| `c3` | 126,772 | 1,220,720 | 1,376,256 | 155,536 |
-| `round-display` | 128,836 | 1,328,928 | 1,376,256 | 47,328 |
-| `s3-headless` | 132,660 | 1,130,976 | 2,097,152 | 966,176 |
-| `jc3636w518c` | 135,812 | 1,241,664 | 2,097,152 | 855,488 |
+| `c3` | 126,772 | 1,220,432 | 1,376,256 | 155,824 |
+| `round-display` | 128,836 | 1,328,608 | 1,376,256 | 47,648 |
+| `s3-headless` | 132,660 | 1,130,640 | 2,097,152 | 966,512 |
+| `jc3636w518c` | 135,812 | 1,241,312 | 2,097,152 | 855,840 |
 
 The C3 round-display image has limited remaining OTA headroom. Keep the
 existing partition layout and check the actual padded `.bin` size before adding
@@ -41,14 +43,19 @@ The generated `release/manifest.json` contains these application images:
 
 | Asset | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `firmware-c3.bin` | 1,220,720 | `7c46b3fe5a6bf5ffcfe70cac626550df1fd866f86553c232584188d22dbc79ea` |
-| `firmware-round-display.bin` | 1,328,928 | `d0807ff0a24f1a5fd6d8f0fd3ebed15f4b4af61488a5a486dc74e4b73cf39fce` |
-| `firmware-s3-headless.bin` | 1,130,976 | `66a438532df54f7dbf41745df557687c4bc9131685dc2f30bc6e802de2de9eae` |
-| `firmware-jc3636w518c.bin` | 1,241,664 | `d18ede21f18919bb9221d302dc0be754af6fc3c9c4238202ffda0b64cd540a07` |
+| `firmware-c3.bin` | 1,220,432 | `57558542903a5710fad052501283d2c27816be33ad5f9276700ebe2eaa7dd4da` |
+| `firmware-round-display.bin` | 1,328,608 | `609254deb2786eaa605a773fe726a463bfd05546e8811d8b8a0e74662502f60a` |
+| `firmware-s3-headless.bin` | 1,130,640 | `ba8a81858677309182b17933706f0c3e31c3147cce3e8ded373475b0ba7e40a3` |
+| `firmware-jc3636w518c.bin` | 1,241,312 | `c12083483fe2227e99ae39cfc2537e0963ddbb9d5b29ae352ab5f310e5a2a1fd` |
 
-`manifest.json` SHA-256: `f5e1c511d5770c4307d8505820c4c648a83cdf50790a76778588675efd102be6`.
-`SHA256SUMS` SHA-256: `35d3f5b3032cd46e251f5fd9190763d75ff433acdf3de7ed366135ae9885d2b6`.
+`manifest.json` SHA-256: `9d4f2d58b4096caaf6895079609847a1d6213b8f96e0a9640ce3714a2d7e838a`.
+`SHA256SUMS` SHA-256: `27ca178efeb30dc0e99463513a80f1edcd133323064746b70f25d3c8abcb5090`.
 The GitHub Release also carries `LICENSE` and the complete `licenses/` notices.
+
+The local macOS build was used for the pre-publication size and marker checks.
+Its firmware bytes are not distributed because framework diagnostic strings can
+contain absolute build-machine paths; the table above records the hosted CI
+artifacts that were downloaded from the release and verified byte-for-byte.
 
 ## Hardware scope and limits
 
