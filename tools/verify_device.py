@@ -5,6 +5,7 @@ Usage: python3 tools/verify_device.py 192.168.1.50
 Requires a populated blocklist and upstream Internet. Leaves pause state unchanged.
 """
 import argparse
+import gzip
 import json
 import secrets
 import socket
@@ -15,7 +16,8 @@ import urllib.request
 
 def request(ip, path):
     with urllib.request.urlopen(f'http://{ip}{path}', timeout=10) as response:
-        return response.read()
+        body = response.read()
+        return gzip.decompress(body) if response.headers.get('Content-Encoding') == 'gzip' else body
 
 
 def stats(ip):

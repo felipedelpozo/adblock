@@ -4,6 +4,11 @@
 // ban clients, add custom block domains. All control state persisted to flash.
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
+#include "pet/pet_runtime.h"
+#include "pet/pet_appearance.h"
+#include "pet/PetAsset.h"
+#include "pet_page.h"
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <LittleFS.h>
@@ -23,6 +28,8 @@ static const char* WIFI_PASS = "";
 #include "blocking_state.h"
 #include "blocked_log.h"
 #include "ui.h"
+#include "display.h"
+#include "touch.h"
 #include "firmware_identity.h"
 #include "github_updater.h"
 #include "blocklist_manager.h"
@@ -202,8 +209,12 @@ static bool handleDns() {
     } else if (blocked) {
       rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++;
       blocked_log::record(dl ? domain : nullptr, static_cast<uint32_t>(cip), qtype, reason);
+      pet_runtime::engine().recordQuery(true, static_cast<uint32_t>(cip), millis());
+      // Client bans are an administrative action, not advertising food.
+      if (!ban && dl) pet_runtime::engine().onBlockedDomain(domain, static_cast<uint32_t>(cip), millis());
     }
-    else         { rlen = forwardUpstream(qlen);     totalAllowed++; if (c) c->allowed++; }
+    else         { rlen = forwardUpstream(qlen);     totalAllowed++; if (c) c->allowed++;
+      pet_runtime::engine().recordQuery(false, static_cast<uint32_t>(cip), millis()); }
     if (rlen > 0) { dnsServer.beginPacket(cip, cport); dnsServer.write(buf, rlen); dnsServer.endPacket(); }
   }
   return did;
@@ -220,7 +231,61 @@ static String jesc(const String& s) {
   return escaped;
 }
 
-#include "page.h"   // dashboard HTML (PROGMEM) — see issue #6
+#include "page_gzip.h"   // generated from the readable dashboard source
+
+// Aggregate-only contract for future local integrations. No domain, client
+// address, or query history is included here.
+static void handlePet() {
+  pet_runtime::engine().tick(millis());
+  const auto state = pet_runtime::engine().snapshot();
+  StaticJsonDocument<1536> document;
+  document["schemaVersion"] = 1;
+  document["name"] = pet_appearance::name();
+  document["skin"] = pet_appearance::skin();
+  document["xp"] = state.xp;
+  document["totalFood"] = state.totalFood;
+  document["level"] = state.level;
+  document["hunger"] = state.hunger;
+  document["happiness"] = state.happiness;
+  document["energy"] = state.energy;
+  document["species"] = pet::speciesName(state.species);
+  document["evolution"] = static_cast<uint8_t>(state.species);
+  document["bornAt"] = state.bornAt;
+  document["lastFed"] = state.lastFed;
+  document["activeMs"] = state.activeMs;
+  document["timestampBasis"] = "active-uptime-ms";
+  document["periodBasis"] = "active-uptime-24h";
+  document["calendarDateKnown"] = false;
+  document["periodElapsedMs"] = state.activeMs % 86400000ULL;
+  document["blockedToday"] = state.blockedToday;
+  document["allowedToday"] = state.allowedToday;
+  document["foodToday"] = state.foodToday;
+  document["rewardEventsToday"] = state.rewardEventsToday;
+  document["uniqueRewardedDomainsToday"] = state.uniqueRewardedDomainsToday;
+  document["clientCountToday"] = state.clientCountToday;
+  document["rewardEvents"] = state.rewardEvents;
+  document["uniqueRewardedDomains"] = state.uniqueRewardedDomains;
+  document["clientCount"] = state.clientCount;
+  document["uniquesApproximate"] = true;
+  document["blocking"] = blocking.active();
+  document["persistent"] = pet_runtime::storageReady();
+  document["savePending"] = pet_runtime::savePending();
+  document["maxSaveMicros"] = pet_runtime::maxSaveMicros();
+  JsonObject diagnostics = document.createNestedObject("diagnostics");
+  diagnostics["heap"] = ESP.getFreeHeap();
+  diagnostics["chip"] = ESP.getChipModel();
+  diagnostics["flashBytes"] = ESP.getFlashChipSize();
+  diagnostics["psramBytes"] = ESP.getPsramSize();
+#ifdef ROUND_DISPLAY
+  diagnostics["displayReady"] = round_ui::display::pageReady();
+  diagnostics["touchReady"] = round_ui::touch::ready();
+  diagnostics["maxRenderMicros"] = round_ui::display::maxRenderMicros();
+#endif
+  String response;
+  serializeJson(document, response);
+  web.sendHeader("Cache-Control", "no-store");
+  web.send(200, "application/json", response);
+}
 
 static void handleStats() {
   uint32_t up = millis() / 1000;
@@ -356,7 +421,7 @@ static void handleFwUpdateDone() {
   const bool ok = fwUploadLocked && fwUploadSucceeded && !fwUploadFailed && Update.end(true);
   web.send(ok ? 200 : (fwUploadConflict ? 409 : 400), "text/plain",
            ok ? "ok, rebooting" : "firmware update failed or another OTA is active");
-  if (ok) { delay(300); ESP.restart(); }
+  if (ok) { pet_runtime::checkpoint(); delay(300); ESP.restart(); }
   if (fwUploadLocked) {
     Update.abort();
     firmwareUpdateUnlock();
@@ -388,6 +453,7 @@ static void handleFwUpload() {
       return;
     }
     fwUploadLocked = true;
+    pet_runtime::checkpoint();
     Serial.printf("[fw-ota] %s\n", u.filename.c_str());
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
       fwUploadFailed = true;
@@ -424,6 +490,87 @@ static bool authorizeGithubRequest() {
     web.send(403, "text/plain", "csrf rejected"); return false;
   }
   return true;
+}
+
+static void handlePetAppearance() {
+  StaticJsonDocument<384> document;
+  document["name"] = pet_appearance::name();
+  document["skin"] = pet_appearance::skin();
+  document["customAvailable"] = pet_appearance::customAvailable();
+  document["assetBytes"] = pet_appearance::assetBytes();
+  document["assetMemory"] = pet_appearance::assetMemory();
+  document["revision"] = pet_appearance::revision();
+  document["storageReady"] = pet_appearance::storageReady();
+  String response;
+  serializeJson(document, response);
+  web.sendHeader("Cache-Control", "no-store");
+  web.send(200, "application/json", response);
+}
+
+static void handleSetPetAppearance() {
+  if (!authorizeGithubRequest()) return;
+  if (githubUpdater.busy() || blocklistManager.busy()) {
+    web.send(409, "text/plain", "device busy"); return;
+  }
+  if (!pet_appearance::set(web.arg("name").c_str(), web.arg("skin").c_str())) {
+    web.send(400, "text/plain", pet_appearance::error()); return;
+  }
+  handlePetAppearance();
+}
+
+static bool spriteStarted = false, spriteEnded = false, spriteRejected = false;
+static bool spriteConflict = false;
+static void handlePetSpriteUpload() {
+  if (!validGithubOrigin() || web.header("X-CSRF-Token") != githubCsrfNonce ||
+      !web.header("Content-Type").startsWith("multipart/form-data")) return;
+  HTTPUpload& upload = web.upload();
+  switch (upload.status) {
+    case UPLOAD_FILE_START:
+      if (spriteStarted) {
+        spriteRejected = true;
+        pet_appearance::abortUpload();
+      } else {
+        spriteStarted = true;
+        spriteConflict = githubUpdater.busy() || blocklistManager.busy();
+        spriteRejected = spriteConflict || !pet_appearance::beginUpload();
+      }
+      break;
+    case UPLOAD_FILE_WRITE:
+      if (!spriteRejected && !pet_appearance::writeUpload(upload.buf, upload.currentSize)) {
+        spriteRejected = true;
+        pet_appearance::abortUpload();
+      }
+      break;
+    case UPLOAD_FILE_END:
+      spriteEnded = true;
+      break;
+    case UPLOAD_FILE_ABORTED:
+      spriteRejected = true;
+      pet_appearance::abortUpload();
+      spriteStarted = spriteEnded = spriteConflict = false;
+      break;
+  }
+}
+
+static void handlePetSpriteDone() {
+  const bool authorized = validGithubOrigin() && web.header("X-CSRF-Token") == githubCsrfNonce;
+  // Commit only after the complete multipart request. A second file part,
+  // truncated body or aborted transfer cannot replace the current appearance.
+  const bool saved = authorized && spriteStarted && spriteEnded && !spriteRejected &&
+                     pet_appearance::finishUpload();
+  if (!saved) pet_appearance::abortUpload();
+  const int code = !authorized ? 403 : spriteConflict ? 409 : saved ? 200 : 400;
+  spriteStarted = spriteEnded = spriteRejected = spriteConflict = false;
+  if (saved) handlePetAppearance();
+  else web.send(code, "text/plain", code == 403 ? "csrf rejected" : "pet sprite rejected; previous asset retained");
+}
+
+static void handleGetPetSprite() {
+  const uint8_t* data = pet_appearance::assetData();
+  if (!data) { web.send(404, "text/plain", "no custom pet"); return; }
+  web.sendHeader("Cache-Control", "no-store");
+  web.send_P(200, "application/octet-stream", reinterpret_cast<const char*>(data),
+             pet_appearance::assetBytes());
 }
 
 static void handleLanguage() {
@@ -528,6 +675,7 @@ static void handleGithubCheck() {
 static void handleGithubInstall() {
   if (!authorizeGithubRequest()) return;
   if (blocklistManager.busy()) { web.send(409, "text/plain", "list update busy"); return; }
+  pet_runtime::checkpoint();
   if (!githubUpdater.requestInstall(web.arg("v"))) {
     web.send(409, "text/plain", "check a compatible release first or updater busy"); return;
   }
@@ -536,6 +684,7 @@ static void handleGithubInstall() {
 
 // Display and web controls share the same volatile pause state.
 static void serviceRoundUi(bool portal = false, const char* ap = "") {
+  pet_runtime::service(millis());
 #ifdef ROUND_DISPLAY
   const uint32_t now = millis();
   const round_ui::Action action = round_ui::poll(now);
@@ -552,6 +701,7 @@ static void serviceRoundUi(bool portal = false, const char* ap = "") {
   static uint32_t sampledAt = 0;
   if (sampledAt == 0 || now - sampledAt >= 250 || action != round_ui::Action::None) {
     sampledAt = now;
+    snapshot.pet = pet_runtime::engine().snapshot();
     snapshot.blocking = blocking.active();
     snapshot.connected = WiFi.status() == WL_CONNECTED;
     snapshot.portal = portal;
@@ -587,6 +737,7 @@ static void handleWifiSetup() {
            "\",\"url\":\"http://192.168.4.1\"}");
   Serial.println("[wifi] setup requested; saved credentials preserved");
   // Keep OTA excluded until restart; only the one-shot setup flag was changed.
+  pet_runtime::checkpoint();
   delay(350);
   ESP.restart();
 }
@@ -600,9 +751,13 @@ void setup() {
   // Never auto-format: an incompatible/missing filesystem must preserve user data.
   if (!LittleFS.begin(false)) Serial.println("[fs] mount failed; data preserved (no format)");
   i18n::begin();
+  pet_runtime::begin(millis());
   round_ui::begin();
   wifi_setup::begin(WIFI_SSID, WIFI_PASS);
   blocklistManager.begin();
+  // The blocklist manager creates the shared filesystem mutex. Appearance
+  // restoration must follow it, otherwise a saved sprite cannot be read.
+  pet_appearance::begin();
   loadCustom(); loadAllowlist(); loadBanned(); loadUpdateCfg();
   Serial.printf("blocklist: %u domains\n", blocklistManager.domains());
   Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
@@ -621,8 +776,24 @@ void setup() {
   if (MDNS.begin("c3adblock")) { MDNS.addService("http", "tcp", 80); Serial.println("dashboard: http://c3adblock.local"); }
 
   dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
-  web.on("/", []() { web.send_P(200, "text/html", PAGE); });
+  web.on("/", []() {
+    web.sendHeader("Content-Encoding", "gzip");
+    web.sendHeader("Cache-Control", "no-cache");
+    web.send_P(200, "text/html; charset=utf-8", reinterpret_cast<const char*>(DASHBOARD_GZIP),
+               DASHBOARD_GZIP_SIZE);
+  });
   web.on("/stats.json", handleStats);
+  web.on("/pet.json", HTTP_GET, handlePet);
+  web.on("/pet", HTTP_GET, []() {
+    web.sendHeader("Content-Encoding", "gzip");
+    web.sendHeader("Cache-Control", "no-cache");
+    web.send_P(200, "text/html; charset=utf-8", reinterpret_cast<const char*>(PET_PAGE_GZIP),
+               PET_PAGE_GZIP_SIZE);
+  });
+  web.on("/pet/appearance.json", HTTP_GET, handlePetAppearance);
+  web.on("/pet/appearance", HTTP_POST, handleSetPetAppearance);
+  web.on("/pet/sprite", HTTP_GET, handleGetPetSprite);
+  web.on("/pet/sprite", HTTP_POST, handlePetSpriteDone, handlePetSpriteUpload);
   web.on("/lists.json", HTTP_GET, handleLists);
   web.on("/lists/profile", HTTP_POST, handleListProfile);
   web.on("/lists/check", HTTP_POST, handleListCheck);
@@ -664,6 +835,8 @@ void setup() {
   githubCsrfNonce = githubUpdater.nonce();
   githubUpdater.begin();
   ArduinoOTA.setHostname("c3adblock");   // pio run -t upload --upload-port c3adblock.local
+  ArduinoOTA.onStart([]() { pet_runtime::checkpoint(); });
+  ArduinoOTA.onEnd([]() { pet_runtime::checkpoint(); });
   ArduinoOTA.begin();
   Serial.println("DNS :53 + dashboard :80 + OTA up");
 }

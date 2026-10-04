@@ -16,11 +16,13 @@ round_ui::Snapshot interactionState;
 
 const char* pageName(round_ui::Page value) {
   switch (value) {
+    case round_ui::Page::PetHome: return "pet-home";
     case round_ui::Page::Status: return "status";
     case round_ui::Page::Activity: return "activity";
     case round_ui::Page::Lists: return "lists";
     case round_ui::Page::Network: return "network";
     case round_ui::Page::Controls: return "controls";
+    case round_ui::Page::PetStatus: return "pet-status";
   }
   return "unknown";
 }
@@ -62,8 +64,15 @@ Action poll(uint32_t now) {
   if (!initialized) return Action::None;
   const Gesture point = touch::poll(now);
   if (point.kind == GestureKind::None) return Action::None;
+  const Page pageBeforeGesture = navigation.page;
   const Action action = navigation.handle(point, interactionState,
                                          sampled && display::pageReady());
+  // A pet tap is deliberately presentation-only. The engine is fed from DNS
+  // events in main; the display gets a short reaction without changing state.
+  if (pageBeforeGesture == Page::PetHome && petTap(point) && sampled && display::pageReady() &&
+      navigation.qrView == QrView::None) {
+    display::reactPet(now);
+  }
   display::setPage(navigation.page);
   display::setQrView(navigation.qrView);
   if (point.kind == GestureKind::SwipeLeft || point.kind == GestureKind::SwipeRight) {
@@ -91,7 +100,9 @@ void update(const Snapshot& snapshot, uint32_t now) {
   navigation.reconcile(snapshot);
   display::setPage(navigation.page);
   if (!sampled || portalChanged || refreshDue(now, lastSampleAt, kSampleIntervalMs)) {
-    display::setSnapshot(snapshot);
+    Snapshot displaySnapshot = snapshot;
+    displaySnapshot.animationTimeMs = now;
+    display::setSnapshot(displaySnapshot);
     sampled = true;
     lastSampleAt = now;
   }

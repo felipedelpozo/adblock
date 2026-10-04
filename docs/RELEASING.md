@@ -19,24 +19,24 @@ read-only permissions; it does not create a release or push source changes.
   newer than the one installed on the device (check the actual installed version).
 
 ```sh
-ADBLOCK_FW_VERSION=0.2.1 pio run -e c3 -e round-display -e s3-headless -e jc3636w518c
+ADBLOCK_FW_VERSION=0.3.2 pio run -e c3 -e round-display -e s3-headless -e jc3636w518c
 pio test -e native
 python -m unittest discover -s tests -v
-node --test tests/test_dashboard_*.cjs
-python tools/package_release.py --version 0.2.1 --output release
+node --test tests/test_dashboard_*.cjs tests/test_pet_dashboard.cjs
+python tools/package_release.py --version 0.3.2 --output release
 ```
 
-For release `0.2.1`, the commands above select the exact stable version that
+For release `0.3.2`, the commands above select the exact stable version that
 must be embedded in every image and repeated by the package manifest. Include
 `LICENSE` and `licenses/` with a distributed binary archive. CI copies them
 into its release artifact automatically. The hosted workflow for the matching
-`v0.2.1` tag remains the final build and package evidence before publication.
+`v0.3.2` tag remains the final build and package evidence before publication.
 
 ## Publish and verify
 
 1. Commit the reviewed source and changelog, push `main`, and inspect the first
    GitHub Actions run. Local checks do not prove the hosted workflow passed.
-2. Create the matching stable tag `v0.2.1` on the reviewed commit. Wait for
+2. Create the matching stable tag `v0.3.2` on the reviewed commit. Wait for
    its firmware workflow; download and review the artifact.
 3. Create a public, stable GitHub Release at that tag. Attach the six required
    files from the artifact: `manifest.json`, `SHA256SUMS` and all four

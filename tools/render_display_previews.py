@@ -11,6 +11,7 @@ modifies a PlatformIO firmware environment.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import struct
@@ -41,6 +42,12 @@ SETUP_SCENARIOS = (
     ("portal-dashboard-qr", "Portal URL QR - 192.168.4.1", "Portal URL QR modal"),
 )
 
+PET_SCENARIOS = (
+    ("pet-home", "Pet home - Blocky", "Animated pet home"),
+    ("pet-status", "Pet status - Blocky", "Pet state page"),
+    ("pet-reward", "Pet reward - +3 food", "Reward feedback"),
+)
+
 SPANISH_CAPTIONS = {
     "status": "Estado - activo",
     "activity": "Actividad - bloqueada",
@@ -54,6 +61,12 @@ SPANISH_SETUP_CAPTIONS = {
     "network-portal": "Red - portal de configuracion",
     "setup-wifi-qr": "QR WiFi - C3-AdBlock-ABCD",
     "portal-dashboard-qr": "QR portal - 192.168.4.1",
+}
+
+SPANISH_PET_CAPTIONS = {
+    "pet-home": "Mascota - Blocky",
+    "pet-status": "Estado mascota - Blocky",
+    "pet-reward": "Recompensa mascota - +3 comida",
 }
 
 ARDUINO_H = r'''#pragma once
@@ -254,6 +267,9 @@ String status(const String& canonical) { return canonical; }
 }  // namespace i18n
 
 static round_ui::Page pageFor(const char* name) {
+  if (std::strcmp(name, "pet-home") == 0 || std::strcmp(name, "pet-reward") == 0)
+    return round_ui::Page::PetHome;
+  if (std::strcmp(name, "pet-status") == 0) return round_ui::Page::PetStatus;
   if (std::strcmp(name, "activity") == 0) return round_ui::Page::Activity;
   if (std::strcmp(name, "lists") == 0) return round_ui::Page::Lists;
   if (std::strcmp(name, "network") == 0 || std::strcmp(name, "dashboard-qr") == 0 ||
@@ -276,6 +292,26 @@ int main(int argc, char** argv) {
   snapshot.blocked = 132684; snapshot.allowed = 45123; snapshot.domains = 99643;
   snapshot.customDomains = 12; snapshot.resumeSeconds = 0; snapshot.clients = 3;
   snapshot.rssi = -52;
+  snapshot.animationTimeMs = 1000;
+  snapshot.pet.xp = 220;
+  snapshot.pet.totalFood = 42;
+  snapshot.pet.level = 2;
+  snapshot.pet.hunger = 82;
+  snapshot.pet.happiness = 91;
+  snapshot.pet.energy = 74;
+  snapshot.pet.species = pet::Species::Blocky;
+  snapshot.pet.bornAt = 0;
+  snapshot.pet.lastFed = 0;
+  snapshot.pet.activeMs = 3600000;
+  snapshot.pet.blockedToday = 132;
+  snapshot.pet.allowedToday = 48;
+  snapshot.pet.foodToday = 3;
+  snapshot.pet.rewardEvents = std::strcmp(scenario, "pet-reward") == 0 ? 1 : 0;
+  snapshot.pet.uniqueRewardedDomains = 42;
+  snapshot.pet.clientCount = 3;
+  snapshot.pet.rewardEventsToday = snapshot.pet.rewardEvents;
+  snapshot.pet.uniqueRewardedDomainsToday = 3;
+  snapshot.pet.clientCountToday = 3;
   std::snprintf(snapshot.ip, sizeof(snapshot.ip), "%s", "192.168.1.50");
   std::snprintf(snapshot.ap, sizeof(snapshot.ap), "%s", "C3-ADBLOCK");
   const bool setupScenario = std::strcmp(scenario, "network-portal") == 0 ||
@@ -290,6 +326,13 @@ int main(int argc, char** argv) {
   if (std::strcmp(scenario, "controls-paused") == 0) { snapshot.blocking = false; snapshot.resumeSeconds = 298; }
 
   if (!round_ui::display::begin()) return 3;
+  if (std::strcmp(scenario, "pet-reward") == 0) {
+    round_ui::Snapshot before = snapshot;
+    before.pet.totalFood = 39;
+    before.pet.rewardEvents = 0;
+    before.animationTimeMs = 750;
+    round_ui::display::setSnapshot(before);
+  }
   round_ui::display::setSnapshot(snapshot);
   round_ui::display::setPage(pageFor(scenario));
   if (std::strcmp(scenario, "dashboard-qr") == 0 ||
@@ -501,10 +544,36 @@ def verify_qr_caption_containment(width: int, height: int, pixels: bytes,
     return total, outside
 
 
-def compile_host(build: Path) -> Path:
+def compile_host(build: Path, asset: Path | None = None, name: str = "Adagotchi") -> Path:
     files = ("display.cpp", "display.h", "display_qr.cpp", "display_qr.h", "ui_model.h", "touch_model.h", "dashboard_link.h", "wifi_qr.h", "i18n.h")
-    for name in files:
-        shutil.copy2(SRC / name, build / name)
+    for filename in files:
+        shutil.copy2(SRC / filename, build / filename)
+    (build / "ui").mkdir()
+    shutil.copy2(SRC / "ui" / "pet_ui.h", build / "ui" / "pet_ui.h")
+    shutil.copy2(SRC / "ui" / "pet_ui.cpp", build / "ui" / "pet_ui.cpp")
+    (build / "pet").mkdir()
+    shutil.copy2(SRC / "pet" / "PetEngine.h", build / "pet" / "PetEngine.h")
+    shutil.copy2(SRC / "pet" / "PetEngine.cpp", build / "pet" / "PetEngine.cpp")
+    shutil.copy2(SRC / "pet" / "PetAsset.h", build / "pet" / "PetAsset.h")
+    shutil.copy2(SRC / "pet" / "PetAsset.cpp", build / "pet" / "PetAsset.cpp")
+    data = asset.read_bytes() if asset else b""
+    if asset and len(data) != 27696:
+        raise ValueError("pet asset must be a fixed-size BPT1 package")
+    if not re.fullmatch(r"[A-Za-z0-9 _-]{1,16}", name) or not name.strip():
+        raise ValueError("pet name must contain 1..16 ASCII letters, digits, spaces, _ or -")
+    initializer = ",".join(str(value) for value in data) or "0"
+    (build / "pet" / "pet_appearance.h").write_text(
+        '#pragma once\n#include <stdint.h>\n#include "PetAsset.h"\nnamespace pet_appearance {\n'
+        f'inline const char* name() {{ return {json.dumps(name)}; }}\n'
+        f'inline const char* skin() {{ return "{ "custom" if asset else "classic" }"; }}\n'
+        'inline uint32_t revision() { return 0; }\n'
+        f'inline const uint8_t* sprite() {{ static const uint8_t data[] = {{{initializer}}}; '
+        f'return {"data" if asset else "nullptr"}; }}\n'
+        'inline size_t spriteFrame(uint8_t state, uint32_t ms) {\n'
+        'static uint8_t map[pet_asset::kFrames]; static bool ready = false;\n'
+        'if (!ready) { pet_asset::buildPlaybackMap(sprite(), map); ready = true; }\n'
+        'const size_t index = pet_asset::frameIndex(state, ms);\n'
+        'return index < pet_asset::kFrames ? map[index] : pet_asset::kInvalidFrameIndex; }\n}\n', encoding="utf-8")
     (build / "Arduino.h").write_text(ARDUINO_H, encoding="utf-8")
     (build / "LovyanGFX.hpp").write_text(LGFX_H, encoding="utf-8")
     (build / "st77916_qspi.h").write_text(ST77916_H, encoding="utf-8")
@@ -514,7 +583,9 @@ def compile_host(build: Path) -> Path:
     run(["clang", "-std=c11", "-I", str(LGFX_SRC), "-c", str(qr_c), "-o", str(qr_obj)], cwd=build)
     binary = build / "display_preview_host"
     run(["clang++", "-std=c++17", "-DROUND_DISPLAY", "-DROUND_DISPLAY_S3", "-I", str(build), "-I", str(LGFX_SRC),
-         str(build / "display.cpp"), str(build / "display_qr.cpp"), str(build / "runner.cpp"), str(qr_obj), "-o", str(binary)], cwd=build)
+         str(build / "display.cpp"), str(build / "display_qr.cpp"), str(build / "runner.cpp"),
+         str(build / "ui" / "pet_ui.cpp"), str(build / "pet" / "PetEngine.cpp"), str(build / "pet" / "PetAsset.cpp"), str(qr_obj),
+         "-o", str(binary)], cwd=build)
     return binary
 
 
@@ -567,15 +638,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--language", choices=("es", "en"), default="es",
                         help="locale rendered by the source display renderer (default: es)")
+    parser.add_argument("--output-dir", type=Path, default=None,
+                        help="write previews and evidence to this directory")
+    parser.add_argument("--pet-only", action="store_true",
+                        help="render only the pet home/status/reward previews")
+    parser.add_argument("--pet-asset", type=Path, help="render a converted local BPT1 sprite")
+    parser.add_argument("--pet-name", default="Adagotchi", help="preview a saved display name")
     parser.add_argument("--keep-build", action="store_true", help="keep the temporary host build directory")
     args = parser.parse_args()
     if not LGFX_SRC.exists():
         raise RuntimeError(f"LovyanGFX checkout is missing: {LGFX_SRC}")
-    OUT.mkdir(parents=True, exist_ok=True)
+    output_dir = args.output_dir or OUT
+    output_dir.mkdir(parents=True, exist_ok=True)
     build_context = tempfile.TemporaryDirectory(prefix="adblock-display-preview-")
     build = Path(build_context.name)
     try:
-        binary = compile_host(build)
+        binary = compile_host(build, args.pet_asset, args.pet_name)
         qr_decoder = build_optional_qr_decoder(build)
         evidence: list[str] = []
         def render_group(scenarios: tuple[tuple[str, str, str], ...], captions: dict[str, str], montage_name: str) -> Path:
@@ -587,8 +665,22 @@ def main() -> int:
                 width, height, raw = read_ppm(ppm)
                 if (width, height) != (360, 360):
                     raise RuntimeError(f"{slug}: expected 360x360, got {width}x{height}")
+                if slug.startswith("pet-"):
+                    # Validate the raw draw before applying the round mask, so
+                    # clipped captions cannot be hidden by a good-looking PNG.
+                    center = (width - 1) / 2
+                    radius = center
+                    background = bytes((0, 12, 16))
+                    outside = sum(
+                        raw[(y * width + x) * 3:(y * width + x) * 3 + 3] != background
+                        for y in range(height) for x in range(width)
+                        if (x - center) ** 2 + (y - center) ** 2 > radius ** 2
+                    )
+                    if outside:
+                        raise RuntimeError(f"{slug}: {outside} foreground pixels outside circular panel")
+                    evidence.append("pet_foreground_outside_circle=0")
                 png_pixels = circularize(width, height, raw)
-                target = OUT / f"display-{slug}{output_suffix(args.language)}.png"
+                target = output_dir / f"display-{slug}{output_suffix(args.language)}.png"
                 write_png(target, width, height, png_pixels)
                 group_images.append((english_caption if args.language == "en" else captions[slug], png_pixels))
                 if slug.endswith("qr"):
@@ -602,13 +694,17 @@ def main() -> int:
                     caption_pixels, outside = verify_qr_caption_containment(width, height, raw, caption_regions)
                     evidence.append(f"qr_caption_pixels={caption_pixels} outside_circle={outside}")
                     evidence.append(optional_qr_decode(target, expected_payload, qr_decoder))
-            montage = OUT / f"{montage_name}{output_suffix(args.language)}.png"
+            montage = output_dir / f"{montage_name}{output_suffix(args.language)}.png"
             make_montage(group_images, montage)
             return montage
 
-        montage = render_group(SCENARIOS, SPANISH_CAPTIONS, "display-pages")
-        setup_montage = render_group(SETUP_SCENARIOS, SPANISH_SETUP_CAPTIONS, "display-setup-flow")
-        if args.language == "en":
+        if args.pet_only:
+            montage = render_group(PET_SCENARIOS, SPANISH_PET_CAPTIONS, "display-pet")
+            setup_montage = None
+        else:
+            montage = render_group(SCENARIOS, SPANISH_CAPTIONS, "display-pages")
+            setup_montage = render_group(SETUP_SCENARIOS, SPANISH_SETUP_CAPTIONS, "display-setup-flow")
+        if args.language == "en" and not args.pet_only:
             for slug in ("dashboard-qr", "setup-wifi-qr", "portal-dashboard-qr"):
                 switch_ppm = build / f"{slug}-switch.ppm"
                 switch_result = run([str(binary), slug, str(switch_ppm), "en", "switch"], cwd=build)
@@ -623,12 +719,15 @@ def main() -> int:
                 if switched_dark != direct_dark:
                     raise RuntimeError(f"mid-render language switch changed the {slug} QR matrix")
                 evidence.append(f"mid_render_switch=es->en page={slug} qr_modules={switched_dark} preserved=yes")
-        (OUT / "DISPLAY_PREVIEWS.md").write_text(rendering_notes(evidence, args.language), encoding="utf-8")
+        (output_dir / "DISPLAY_PREVIEWS.md").write_text(
+            rendering_notes(evidence, args.language, args.pet_only), encoding="utf-8")
         print("Generated:")
-        for slug, _, _ in SCENARIOS + SETUP_SCENARIOS:
-            print(f"  {OUT / f'display-{slug}{output_suffix(args.language)}.png'}")
+        rendered_scenarios = PET_SCENARIOS if args.pet_only else SCENARIOS + SETUP_SCENARIOS
+        for slug, _, _ in rendered_scenarios:
+            print(f"  {output_dir / f'display-{slug}{output_suffix(args.language)}.png'}")
         print(f"  {montage}")
-        print(f"  {setup_montage}")
+        if setup_montage:
+            print(f"  {setup_montage}")
         print("Evidence:")
         for line in evidence:
             print(f"  {line}")
@@ -642,13 +741,15 @@ def main() -> int:
     return 0
 
 
-def rendering_notes(evidence: list[str], language: str) -> str:
+def rendering_notes(evidence: list[str], language: str, pet_only: bool = False) -> str:
     locale_name = "English" if language == "en" else "Spanish"
+    scope_note = "The pet-only run writes the three pet views to `display-pet*.png`, using Blocky level 2, 220 XP, 42 lifetime food, 3 food in the active period, 82 fullness and 74 energy. Raw foreground pixels are checked against the circular boundary before masking." if pet_only else "The normal run writes the six appliance pages and three setup-flow pages."
     return f"""# Round display previews ({locale_name})
 
 These previews are deterministic host renders of the repository's actual round
 display renderer. The tool copies `src/display.cpp`, `src/display_qr.cpp`,
-`src/wifi_qr.h`, the current `src/i18n.h`, and their model headers into a
+`src/ui/pet_ui.*`, `src/pet/PetEngine.h`, `src/wifi_qr.h`, the current
+`src/i18n.h`, and their model headers into a
 temporary directory, compiles the renderer unchanged with a small
 Arduino/LovyanGFX drawing shim and a host locale implementation matching the
 current i18n API, and uses the bundled LovyanGFX `glcdfont.h` bitmap font and
@@ -657,6 +758,8 @@ geometry, 360 px S3 scaling, 8 px clipped stripes, palette, controls, locale,
 and QR layout. The six original pages retain the 3-by-2 `display-pages*.png`
 montage. The three setup-flow pages are separate 3-by-1
 `display-setup-flow*.png` montages, with matching standalone PNGs.
+
+{scope_note}
 
 The six source pages use one explicit demonstration snapshot: 99,643 loaded
 domains, 132,684 blocked requests, 45,123 allowed requests, 3 clients, -52 dBm,

@@ -1,3 +1,4 @@
+#include "pet/pet_runtime.h"
 #include "wifi_setup.h"
 
 #include <DNSServer.h>
@@ -388,9 +389,13 @@ void checkPortalState() {
       now - stateChangedAt >= 1000) {
     portalState = PortalState::Idle;
   }
-  if (rebootAt != 0 && static_cast<int32_t>(now - rebootAt) >= 0) ESP.restart();
+  if (rebootAt != 0 && static_cast<int32_t>(now - rebootAt) >= 0) {
+    pet_runtime::checkpoint();
+    ESP.restart();
+  }
   if (rebootAt == 0 && fallbackAvailable && now - lastActivityAt >= kPortalIdleDeadlineMs &&
       portalState != PortalState::Connecting) {
+    pet_runtime::checkpoint();
     ESP.restart();
   }
 }

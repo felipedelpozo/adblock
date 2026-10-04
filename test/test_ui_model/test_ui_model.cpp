@@ -49,14 +49,47 @@ void test_percentage_widens_counters() {
 
 void test_cyclic_pages() {
   using namespace round_ui;
-  Page page = Page::Status;
-  for (uint8_t i = 1; i < kPageCount; ++i) {
+  const Page expected[] = {Page::PetHome, Page::Status, Page::Activity, Page::Lists,
+                           Page::Network, Page::Controls, Page::PetStatus};
+  Page page = Page::PetHome;
+  for (uint8_t i = 1; i <= kPageCount; ++i) {
     page = adjacentPage(page, 1);
-    TEST_ASSERT_EQUAL_INT(i, static_cast<uint8_t>(page));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(expected[i % kPageCount]), static_cast<int>(page));
   }
-  TEST_ASSERT_EQUAL_INT(static_cast<int>(Page::Status), static_cast<int>(adjacentPage(page, 1)));
-  TEST_ASSERT_EQUAL_INT(static_cast<int>(Page::Controls), static_cast<int>(adjacentPage(Page::Status, -1)));
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(Page::PetStatus),
+                        static_cast<int>(adjacentPage(Page::PetHome, -1)));
   TEST_ASSERT_EQUAL_INT(static_cast<int>(Page::Network), static_cast<int>(adjacentPage(Page::Controls, -1)));
+}
+
+void test_pet_home_and_status_are_presentation_only() {
+  using namespace round_ui;
+  Snapshot snapshot;
+  Navigation navigation;
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(Page::PetHome), static_cast<int>(navigation.page));
+
+  Gesture tap;
+  tap.kind = GestureKind::Tap;
+  tap.startX = tap.x = 120;
+  tap.startY = tap.y = 120;
+  TEST_ASSERT_TRUE(petTap(tap));
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(Action::None),
+                        static_cast<int>(navigation.handle(tap, snapshot, true)));
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(Page::PetHome), static_cast<int>(navigation.page));
+
+  tap.startY = tap.y = 54;
+  TEST_ASSERT_TRUE(petTap(tap));
+  tap.startY = tap.y = 53;
+  TEST_ASSERT_FALSE(petTap(tap));
+  tap.startY = tap.y = 120;
+  tap.startX = tap.x = 20;
+  TEST_ASSERT_FALSE(petTap(tap));
+
+  Gesture swipe;
+  swipe.kind = GestureKind::SwipeRight;
+  navigation.handle(swipe, snapshot, true);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(Page::PetStatus), static_cast<int>(navigation.page));
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(Action::None),
+                        static_cast<int>(navigation.handle(tap, snapshot, true)));
 }
 
 void test_tap_only_emits_at_release() {
@@ -286,6 +319,7 @@ int main() {
   UNITY_BEGIN();
   RUN_TEST(test_hit_testing);
   RUN_TEST(test_cyclic_pages);
+  RUN_TEST(test_pet_home_and_status_are_presentation_only);
   RUN_TEST(test_tap_only_emits_at_release);
   RUN_TEST(test_swipe_over_pause_button_never_taps);
   RUN_TEST(test_vertical_diagonal_and_reversed_drag_do_not_tap);

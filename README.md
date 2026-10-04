@@ -12,15 +12,16 @@ or ESP32-S3, point a device's DNS at it, and manage blocking from your browser.
 
 *AI-generated product illustration for orientation; it is not a physical hardware capture. See [prompt and provenance](docs/images/HERO.md).*
 
-**[Download v0.2.1](https://github.com/felipedelpozo/adblock/releases/tag/v0.2.1)**
+**[Download v0.3.2](https://github.com/felipedelpozo/adblock/releases/tag/v0.3.2)**
 · [Setup](#getting-started) · [Hardware & pinout](#hardware-profiles)
 · [Firmware updates](#ota-and-persistent-updates) · [FAQ](#faq)
 · [Spanish / English](docs/LANGUAGES.md)
 
-The current source/local build is **0.2.4**. Wi-Fi reconfiguration, shared
-Spanish/English UI and setup Wi-Fi QR are available in this source build;
-they are pending a firmware release and are not included in the **v0.2.1**
-download.
+The current stable release is **0.3.2**. It includes local Adagotchi Phase 1,
+dashboard pet customization, Wi-Fi reconfiguration, shared Spanish/English UI
+and setup Wi-Fi QR onboarding. The application-only release contains matching
+images for all four profiles; choose the exact profile for an existing,
+compatible partition layout.
 
 An adaptation of [M-Abozaid/esp32-c3-adblock](https://github.com/M-Abozaid/esp32-c3-adblock)
 (upstream `c56456ac535844d9eecd6cfee030a2e23dc797d1`). The same DNS sinkhole,
@@ -47,15 +48,144 @@ LAN; see [security and limitations](SECURITY.md).
   scan the display's setup Wi-Fi QR to connect your phone.
 - **Local dashboard:** live counters, observed clients and a searchable history
   of the last 64 blocked queries; no cloud account or external web assets.
+- **Adagotchi pet:** local persistent progression, bounded rewards, six
+  evolutions and active-uptime health state that never needs a cloud service.
+- **Pet customization:** rename the pet, choose a built-in skin or import a
+  Codex v1/v2 WebP sheet as a validated BPT1 animation asset from the dashboard.
 - **Spanish and English:** a shared saved language preference for the dashboard,
   round display and Wi-Fi setup portal; no external translation service.
-- **Round touch UI:** five swipe pages for status, activity, lists, network and
+- **Round touch UI:** seven swipe pages for pet, status, activity, lists, network and
   controls; pause for 5/30 minutes or resume, and scan a local dashboard QR.
 - **Verified GitHub OTA:** confirm a compatible release, then verify HTTPS,
   image size, SHA-256 and embedded board/profile/version identity before reboot.
 - **Low-memory display:** LovyanGFX, incremental 8-row stripes and no full-screen
   framebuffer; Wi-Fi provisioning uses a captive portal.
 - **One codebase:** headless C3/S3, GC9A01 240×240 and ST77916 QSPI 360×360 profiles.
+
+## Adagotchi Phase 1 (local)
+
+The pet runs entirely on the appliance, without Muse, AI accounts, audio,
+or external services. `src/pet/PetEngine.*` is portable C++;
+`src/pet/pet_runtime.*` connects it to NVS, and `src/ui/pet_ui.*` draws through
+the existing clipped LovyanGFX renderer. The DNS response and existing
+blocklist, portal, dashboard, pause controls and OTA paths remain shared.
+
+A blocked domain earns **1 food and 10 XP**, with **+1 food / +1 XP** for a
+previously unseen rewarded domain and another **+1 food / +1 XP** for a
+previously unseen rewarded client: maximum **3 food / 12 XP per event**.
+Domain matching is case-insensitive, with an optional trailing dot ignored.
+The same domain can earn at most once every **60 active seconds**, across
+clients and DNS query types. There are at most **30 reward events per rolling
+active hour**, regardless of bonuses. All limits survive restart and OTA.
+Only accepted domain blocks feed the pet; client bans, paused/allowed queries,
+allowlist exceptions, malformed names and failed lookups do not grant food.
+
+| XP threshold | Level | Evolution |
+| ---: | ---: | --- |
+| 0 | 0 | Egg |
+| 50 | 1 | Hatchling |
+| 200 | 2 | Blocky |
+| 500 | 3 | AdHunter |
+| 1,000 | 4 | AdEater |
+| 2,000 | 5 | Void |
+
+Higher hunger values mean **fuller**, not hungrier. Hunger/fullness,
+happiness and energy start at 100, stay within 20–100, and never cause death.
+While powered, fullness loses one point per 15 minutes, happiness and energy
+one per 30 minutes. Each food restores 4 fullness, 3 happiness and 2 energy.
+Offline time is frozen: there is no wall-clock dependency or catch-up penalty.
+
+NVS stores one versioned CRC32-protected blob in the separate `adagotchi`
+namespace. A low-priority task commits rewards outside DNS processing;
+ordinary counters/time checkpoint every 15 minutes and before controlled
+restarts/OTA. No Wi-Fi namespace, list or partition is changed. A sudden
+power cut can lose an in-flight reward or up to 15 minutes of ordinary
+counter/time updates. An invalid/newer save is retained and reported as
+`persistent:false`, rather than silently overwritten.
+
+Novelty/client estimates use fixed persistent Bloom filters. False positives
+can suppress novelty bonuses and under-count distinct domains/clients; filters
+can saturate. Base food/XP continues, and the exact cooldown/hourly quota does
+not depend on the estimates. No query text or client address is stored in the
+pet's public snapshot. The existing blocked-query history remains separate.
+
+Swipe left/right through all seven pages. Tap the mascot for a visual reaction
+that gives no reward. Long press is reserved and currently does nothing.
+The home page shows the animated pet, species, level, fullness/energy and
+food/blocked counts for the active period. Pet status shows its health and
+progress; the existing AdBlock pages and 5/30-minute pause/resume stay available.
+
+`GET /pet.json` returns aggregate-only JSON: `xp`, `totalFood`, `level`,
+`species`/`evolution`, `hunger`, `happiness`, `energy`, `bornAt`, `lastFed`,
+`activeMs`, `blockedToday`, `allowedToday`, `foodToday`, `rewardEventsToday`,
+`uniqueRewardedDomainsToday`, `clientCountToday`, lifetime `rewardEvents`,
+`uniqueRewardedDomains` and `clientCount`, and persistence diagnostics.
+It contains no domain/URL history or client identifiers. `/stats.json` keeps
+its existing dashboard contract; pet aggregates are exposed separately.
+
+**“Today” is an anchored 24-hour period of accumulated active uptime** since
+pet creation, preserved across boots, rather than a calendar date.
+`periodBasis:"active-uptime-24h"`, `calendarDateKnown:false` and
+`periodElapsedMs` make this explicit. `bornAt`/`lastFed` are milliseconds on
+that same accumulated clock, with `timestampBasis:"active-uptime-ms"`;
+`bornAt:0` is the origin, never a fabricated Unix date. Distinct counts carry
+`uniquesApproximate:true`. Internet time is not required or requested.
+
+See [Phase 1 validation](docs/ADAGOTCHI_PHASE1_VALIDATION.md) for build sizes,
+physical S3 installation and the remaining serial/touch validation limits.
+The C3 round application image has only 21,520 bytes of OTA-slot headroom in
+this build; retain the existing partition layout and check actual `.bin` size
+before adding more firmware features.
+
+## Pet customization from the dashboard
+
+Open **Customize pet** in the dashboard settings (or `/pet`). Rename your pet
+and select Classic, Amber or Violet without changing its XP, food or evolution.
+Names use 1–16 ASCII letters/digits, spaces, `_` or `-` so both panel fonts can
+render them reliably. Saved appearance is independent of the PetEngine state.
+
+You can import a downloaded [Codex Pets](https://codex-pets.net/) sprite sheet.
+Extract the downloaded ZIP on your computer and choose `spritesheet.webp` in
+the customization page. Standard Codex v1 (8 columns × 9 rows) and v2
+(8 × 11) sheets are supported. Preview the animation before uploading; other
+PNG/WebP sheets can use explicit grid/row controls. This imports the sheet's
+artwork, not its remote AI behavior. The display still reports local evolution.
+
+The browser resizes frames to 48×48 and converts them to a fixed **27,696-byte
+BPT1** asset: 15 RGB565 colors plus transparency, four states with six frames
+each, played at 4 Hz. Idle, waving, jumping and waiting rows become idle,
+reaction, feeding and low-energy animations. Conversion loses some color and
+detail; the preview shows the converted result. Dashboard and display skip
+contracted poses (opaque width or height below 90% of the largest-area pose
+in that state), holding the preceding stable frame without resizing the sprite.
+The stored asset remains unchanged; playback analysis runs once per asset. Large source sheets remain on
+your computer. Normal device operation requires no external asset server.
+Changing to a built-in skin retains the uploaded asset for later selection.
+
+The device validates size, metadata and CRC32 before activation, keeps the asset
+in RAM (PSRAM when available), and draws only the current clipped stripe with
+LovyanGFX. There is no PNG/WebP decoder, LVGL or full display framebuffer.
+Two filesystem slots plus a single atomic NVS selection record preserve the
+previous committed appearance if upload/validation fails or power is lost.
+Allocation failure rejects the new asset; the procedural pet remains available.
+Uploading or saving is a configuration operation and can briefly delay DNS,
+like the existing filesystem/OTA controls. Normal animation does not access flash.
+
+| Local endpoint | Contract |
+| --- | --- |
+| `GET /pet` | Local bilingual customization page |
+| `GET /pet/appearance.json` | Name, skin, asset availability/size and saved revision |
+| `POST /pet/appearance?name=...&skin=...` | Save appearance only; same-origin + `X-CSRF-Token` |
+| `GET /pet/sprite` | Download the stored BPT1 asset (404 when absent) |
+| `POST /pet/sprite` | One multipart BPT1 file; same-origin + `X-CSRF-Token` |
+
+`/pet.json` also exposes the chosen `name` and `skin`. Use the boot nonce from
+`/stats.json` for mutation requests. Importing assets never erases Wi-Fi,
+blocklists, allowed domains or progress. Use artwork you have permission to
+use; a community gallery's website source license does not license every pet.
+
+See [local customization validation](docs/ADAGOTCHI_CUSTOMIZATION_VALIDATION.md) for the
+build budgets, observed hardware behavior and validation limits.
 
 ## Screenshots
 
@@ -81,12 +211,12 @@ host-rendering method and physical-panel differences.
 
 ### Firmware updates from GitHub Releases
 
-![ESP32 GitHub OTA dashboard showing the local 0.2.4 build and public release status](docs/images/dashboard-updates.jpg)
+![ESP32 GitHub OTA dashboard showing a local feature build and public release status](docs/images/dashboard-updates.jpg)
 
 Dashboard images are browser captures of the firmware HTML served with
 synthesized data: addresses, counters and history entries are examples. The
-preview represents the current local 0.2.4 feature build; the latest public
-release remains v0.2.1 and no 0.2.4 release is implied.
+display previews use synthetic state generated by the source renderer and are
+not physical screen photographs.
 [Reproduce the captures](docs/images/README.md).
 
 ## Getting started
@@ -148,18 +278,20 @@ in [td0034/JC3636W518](https://github.com/td0034/JC3636W518) and the independent
 
 LovyanGFX draws directly to the display: no LVGL, sprite or full-screen
 framebuffer. A shared logical 240×240 layout scales to 360×360. Horizontal
-swipes navigate five circular pages, wrapping at either end:
+swipes navigate seven circular pages, wrapping at either end:
 
 | Page | Information / actions |
 | --- | --- |
+| Adagotchi | Animated pet, species, level, food and blocked counts, hunger/energy |
 | Status | Large active/paused state and remaining pause time |
 | Activity | Blocking percentage, blocked and allowed query counts |
 | Lists | Loaded blocklist domains and custom domain count |
 | Network | Wi-Fi/portal status, IP, observed DNS clients, RSSI and dashboard QR |
 | Controls | Large 5-minute / 30-minute pause buttons and conditional resume |
+| Pet status | Hunger, happiness, energy and progress details |
 
-Swipe left for the next page, right for the previous page. Five dots at the
-bottom indicate position. The device starts on Status after reboot, or the
+Swipe left for the next page, right for the previous page. Seven dots at the
+bottom indicate position. The device starts on Adagotchi after reboot, or the
 setup Wi-Fi QR when provisioning. Labels follow the saved Spanish/English
 preference. Touch actions fire on release,
 on Controls and the Network dashboard button; a swipe that starts on a button
@@ -218,11 +350,14 @@ page. Search matches domains and client IPs without case sensitivity and is
 limited to 63 characters. All DNS bytes are escaped before JSON serialization;
 the browser displays received strings as text. No external assets are needed.
 
-The round display separates status, activity, lists, network and controls.
+The round display separates the pet, status, activity, lists, network, controls and pet state.
 Only the visible page's changing regions redraw. A round robin repaint schedule
 prevents continuously changing statistics from delaying other regions.
 Rendering remains clipped to eight logical rows, without a full-screen
 framebuffer; changing pages cancels the previous page's pending paint work.
+
+Run `python tools/verify_pet.py DEVICE_IP` to exercise real DNS feeding and NVS checkpoints.
+This generates blocked queries and needs an available hourly reward slot; it changes no settings.
 
 Run `python tools/verify_history.py DEVICE_IP` to check the live history. This
 deliberately generates 80 blocked queries and replaces the volatile recent
@@ -241,7 +376,7 @@ pio run -e jc3636w518c
 pio run -e c3 -e round-display -e s3-headless
 pio test -e native
 python -m unittest discover -s tests -v
-node --test tests/test_dashboard_*.cjs
+node --test tests/test_dashboard_*.cjs tests/test_pet_dashboard.cjs
 ```
 
 Node.js 22+ runs the dashboard unit tests; Python/PlatformIO build the firmware.
@@ -260,7 +395,7 @@ The HaGeZi default uses the current `wildcard/light-onlydomains.txt` path.
 A failed source or empty list stops the build and preserves the old output.
 The result is sorted unique 40-bit FNV-1a hashes, matching the original engine.
 
-Firmware 0.2.1 offers **Ligero**, **Equilibrado** (recommended) and **Estricto**
+Firmware 0.3.2 offers **Ligero**, **Equilibrado** (recommended) and **Estricto**
 directly in the dashboard. The current source also labels these **Light**,
 **Balanced** and **Strict** when English is selected. Existing installations
 retain their current list as **Personalizada / Custom** until a profile is
@@ -329,8 +464,7 @@ stable. See [Wi-Fi reconfiguration](docs/WIFI_SETUP.md) for recovery and API det
 
 ![Wi-Fi reconfiguration panel in the dashboard, with synthetic documentation data](docs/images/dashboard-wifi.jpg)
 
-This panel is shown from the current local 0.2.4 feature build. The screenshot
-uses example network data. A new network is saved only after a successful
+This panel uses example network data. A new network is saved only after a successful
 connection; a change of IP also requires updating the DNS address on your
 router or clients.
 
@@ -361,8 +495,8 @@ activating its inactive OTA slot. Wi-Fi, settings and LittleFS are retained.
 No releases means no installation; updates are never installed automatically.
 See [GitHub update and release instructions](docs/GITHUB_FIRMWARE_UPDATES.md)
 for the manifest contract, publishing the six release assets and CI builds.
-See the [latest v0.2.1 release validation](docs/RELEASE_VALIDATION_0.2.1.md)
-for published-asset checksums and the physical OTA/device evidence. The
+See the [v0.3.2 release validation](docs/RELEASE_VALIDATION_0.3.2.md)
+for published-asset checksums, build gates and hardware limits. The
 [pre-release GitHub and QR validation](docs/GITHUB_QR_VALIDATION.md) remains as
 historical preparation evidence; optical phone-camera QR scanning is still
 pending.

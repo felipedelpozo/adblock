@@ -2,6 +2,7 @@
 
 #include <HTTPClient.h>
 #include <Update.h>
+#include "pet/pet_runtime.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <esp_ota_ops.h>
@@ -362,6 +363,8 @@ void GithubUpdater::runInstall() {
   // selected boot partition after verification has succeeded.
   progress_ = 100;
   setStatus("Firmware verificado; reiniciando en " + version);
+  // The main loop submits reward snapshots throughout the download.
+  if (!pet_runtime::flushPending()) Serial.println("[pet] pending checkpoint before OTA reboot");
   delay(500);
   ESP.restart();
 }

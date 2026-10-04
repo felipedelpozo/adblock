@@ -8,6 +8,9 @@
 #include <cstring>
 #include "display_qr.h"
 #include "i18n.h"
+#include "ui/pet_ui.h"
+#include "pet/pet_appearance.h"
+#include "pet/PetAsset.h"
 
 #if defined(ROUND_DISPLAY_S3)
 #include "st77916_qspi.h"
@@ -71,8 +74,8 @@ constexpr int32_t kSliceHeight = 8;
 
 round_ui::Snapshot current;
 round_ui::Snapshot paint;
-round_ui::Page currentPage = round_ui::Page::Status;
-round_ui::Page paintPage = round_ui::Page::Status;
+round_ui::Page currentPage = round_ui::Page::PetHome;
+round_ui::Page paintPage = round_ui::Page::PetHome;
 round_ui::QrView currentQr = round_ui::QrView::None;
 round_ui::QrView paintQr = round_ui::QrView::None;
 bool activeChanged = false;
@@ -88,13 +91,34 @@ uint32_t maxRenderUs = 0;
 uint32_t renderCount = 0;
 bool languageInitialized = false;
 bool renderedEnglish = false;
+uint32_t rewardAmount = 0;
+uint32_t rewardUntilMs = 0;
+uint32_t petReactionUntilMs = 0;
+bool rewardPending = false;
+bool petSnapshotSampled = false;
+uint32_t appearanceRevision = 0;
+
+uint8_t petAnimationRegions() {
+  // Custom artwork starts at y=54 and crosses the y=60 region boundary.
+  // Procedural pets start below it; both keep the footer region untouched.
+  return pet_appearance::sprite() ? 0x07 : 0x06;
+}
+
+bool samePetRenderSnapshot(const pet::Snapshot& a, const pet::Snapshot& b) {
+  return a.xp == b.xp && a.totalFood == b.totalFood && a.level == b.level &&
+         a.hunger == b.hunger && a.happiness == b.happiness && a.energy == b.energy &&
+         a.species == b.species && a.blockedToday == b.blockedToday &&
+         a.allowedToday == b.allowedToday && a.foodToday == b.foodToday &&
+         a.rewardEvents == b.rewardEvents;
+}
 
 bool sameSnapshot(const round_ui::Snapshot& a, const round_ui::Snapshot& b) {
   return a.blocking == b.blocking && a.connected == b.connected && a.portal == b.portal &&
          a.blocked == b.blocked && a.allowed == b.allowed && a.domains == b.domains &&
          a.customDomains == b.customDomains && a.resumeSeconds == b.resumeSeconds &&
          a.clients == b.clients && a.rssi == b.rssi && std::strcmp(a.ip, b.ip) == 0 &&
-         std::strcmp(a.ap, b.ap) == 0;
+         std::strcmp(a.ap, b.ap) == 0 && a.animationTimeMs == b.animationTimeMs &&
+         samePetRenderSnapshot(a.pet, b.pet);
 }
 
 constexpr uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
@@ -179,6 +203,87 @@ void textCentered(const char* value, int32_t centerX, int32_t y, uint16_t color,
   text(value, centerX - logicalWidth / 2, y, color, size);
 }
 
+void petFillRect(void*, int32_t x, int32_t y, int32_t width, int32_t height, uint16_t color) {
+  fillRect(x, y, width, height, color);
+}
+
+void petFillRoundRect(void*, int32_t x, int32_t y, int32_t width, int32_t height, int32_t radius,
+                      uint16_t color) {
+  fillRoundRect(x, y, width, height, radius, color);
+}
+
+void petOutlineRoundRect(void*, int32_t x, int32_t y, int32_t width, int32_t height,
+                         int32_t radius, uint16_t color) {
+  outlineRoundRect(x, y, width, height, radius, color);
+}
+
+void petFillCircle(void*, int32_t x, int32_t y, int32_t radius, uint16_t color) {
+  fillCircle(x, y, radius, color);
+}
+
+void petLine(void*, int32_t x1, int32_t y1, int32_t x2, int32_t y2, uint16_t color) {
+  line(x1, y1, x2, y2, color);
+}
+
+void petText(void*, const char* value, int32_t x, int32_t y, uint16_t color, uint8_t size) {
+  text(value, x, y, color, size);
+}
+
+void petTextCentered(void*, const char* value, int32_t x, int32_t y, uint16_t color,
+                    uint8_t size) {
+  textCentered(value, x, y, color, size);
+}
+
+bool petSprite(void*, uint32_t animationMs, uint8_t state) {
+  const uint8_t* asset = pet_appearance::sprite();
+  if (!asset) return false;
+  const size_t frame = pet_appearance::spriteFrame(state, animationMs);
+  // A 48px asset is drawn at 2 logical pixels per texel. Only rows intersecting
+  // the current stripe are inspected; transparent runs never touch the panel.
+  for (uint8_t row = 0; row < 48; ++row) {
+    const int32_t y = 54 + row * 2;
+    if (!intersects(y, 2)) continue;
+    for (uint8_t col = 0; col < 48;) {
+      const uint8_t index = pet_asset::pixel(asset, frame, col, row);
+      uint8_t end = col + 1;
+      while (end < 48 && pet_asset::pixel(asset, frame, end, row) == index) ++end;
+      if (index) fillRect(72 + col * 2, y, (end - col) * 2, 2,
+                         pet_asset::palette(asset, index));
+      col = end;
+    }
+  }
+  return true;
+}
+
+round_ui::pet_ui::Canvas petCanvas() {
+  round_ui::pet_ui::Canvas canvas;
+  canvas.fillRect = petFillRect;
+  canvas.fillRoundRect = petFillRoundRect;
+  canvas.outlineRoundRect = petOutlineRoundRect;
+  canvas.fillCircle = petFillCircle;
+  canvas.line = petLine;
+  canvas.text = petText;
+  canvas.textCentered = petTextCentered;
+  canvas.sprite = petSprite;
+  return canvas;
+}
+
+round_ui::pet_ui::Palette petPalette() {
+  round_ui::pet_ui::Palette palette = {kBackground, kPanel, kPanelRaised, kInk, kMuted,
+      kTeal, kTealDim, kCoral, kAmber, rgb565(96, 184, 130), rgb565(35, 92, 72),
+      rgb565(173, 245, 181)};
+  if (std::strcmp(pet_appearance::skin(), "amber") == 0) {
+    palette.pet = rgb565(235, 157, 66);
+    palette.petShadow = rgb565(111, 65, 30);
+    palette.petAccent = rgb565(255, 225, 142);
+  } else if (std::strcmp(pet_appearance::skin(), "violet") == 0) {
+    palette.pet = rgb565(162, 127, 221);
+    palette.petShadow = rgb565(71, 49, 106);
+    palette.petAccent = rgb565(235, 191, 255);
+  }
+  return palette;
+}
+
 void formatCompact(uint32_t value, char* output, size_t capacity) {
   if (value < 1000U) {
     std::snprintf(output, capacity, "%lu", static_cast<unsigned long>(value));
@@ -258,16 +363,31 @@ const char* tr(const char* englishText, const char* spanishText) {
 }
 
 void drawDots() {
-  constexpr int32_t kFirstDot = 104;
-  for (uint8_t index = 0; index < 5; ++index) {
+  constexpr int32_t kFirstDot = 96;
+  for (uint8_t index = 0; index < round_ui::kPageCount; ++index) {
     const bool selected =
-        (index == 0 && currentPage == round_ui::Page::Status) ||
-        (index == 1 && currentPage == round_ui::Page::Activity) ||
-        (index == 2 && currentPage == round_ui::Page::Lists) ||
-        (index == 3 && currentPage == round_ui::Page::Network) ||
-        (index == 4 && currentPage == round_ui::Page::Controls);
-    fillCircle(kFirstDot + index * 8, 214, selected ? 2 : 1, selected ? kTeal : kMuted);
+        (index == 0 && currentPage == round_ui::Page::PetHome) ||
+        (index == 1 && currentPage == round_ui::Page::Status) ||
+        (index == 2 && currentPage == round_ui::Page::Activity) ||
+        (index == 3 && currentPage == round_ui::Page::Lists) ||
+        (index == 4 && currentPage == round_ui::Page::Network) ||
+        (index == 5 && currentPage == round_ui::Page::Controls) ||
+        (index == 6 && currentPage == round_ui::Page::PetStatus);
+    fillCircle(kFirstDot + index * 8, 224, selected ? 2 : 1, selected ? kTeal : kMuted);
   }
+}
+
+void drawPetHomePage() {
+  const auto canvas = petCanvas();
+  const auto palette = petPalette();
+  round_ui::pet_ui::drawHome(canvas, palette, paint.pet, paint.animationTimeMs, rewardAmount,
+                             rewardUntilMs, petReactionUntilMs, i18n::english(), pet_appearance::name());
+}
+
+void drawPetStatusPage() {
+  const auto canvas = petCanvas();
+  const auto palette = petPalette();
+  round_ui::pet_ui::drawStatus(canvas, palette, paint.pet, i18n::english());
 }
 
 void drawStatusPage() {
@@ -488,11 +608,13 @@ void drawCurrentPage() {
     return;
   }
   switch (paintPage) {
+    case round_ui::Page::PetHome: drawPetHomePage(); break;
     case round_ui::Page::Status: drawStatusPage(); break;
     case round_ui::Page::Activity: drawActivityPage(); break;
     case round_ui::Page::Lists: drawListsPage(); break;
     case round_ui::Page::Network: drawNetworkPage(); break;
     case round_ui::Page::Controls: drawControlsPage(); break;
+    case round_ui::Page::PetStatus: drawPetStatusPage(); break;
   }
   drawDots();
 }
@@ -520,7 +642,7 @@ bool begin() {
   digitalWrite(round_ui::pins::kDisplayBacklight, HIGH);
   current = round_ui::Snapshot{};
   paint = current;
-  currentPage = round_ui::Page::Status;
+  currentPage = round_ui::Page::PetHome;
   paintPage = currentPage;
   currentQr = paintQr = round_ui::QrView::None;
   pageReadyFlag = false;
@@ -532,6 +654,11 @@ bool begin() {
   renderCount = 0;
   languageInitialized = true;
   renderedEnglish = i18n::english();
+  rewardAmount = 0;
+  rewardUntilMs = 0;
+  petReactionUntilMs = 0;
+  rewardPending = false;
+  petSnapshotSampled = false;
   return true;
 }
 
@@ -547,6 +674,13 @@ void setPage(round_ui::Page page) {
   dirtyRegions = kAllRegions;
   initialPendingRegions = kAllRegions;
   pageReadyFlag = false;
+}
+
+void reactPet(uint32_t now) {
+  if (currentPage != round_ui::Page::PetHome) return;
+  petReactionUntilMs = now + 650U;
+  dirtyRegions |= petAnimationRegions();
+  if (activeRegion >= 0) activeChanged = true;
 }
 
 bool pageReady() { return pageReadyFlag; }
@@ -581,6 +715,20 @@ void setSnapshot(const round_ui::Snapshot& snapshot) {
                                       std::strcmp(current.ap, snapshot.ap) != 0;
   const bool networkStatsChanged = current.clients != snapshot.clients ||
                                    current.rssi != snapshot.rssi;
+  const bool petDisplayChanged = !samePetRenderSnapshot(current.pet, snapshot.pet);
+  const bool petAnimationChanged = current.animationTimeMs != snapshot.animationTimeMs;
+  const bool petRewardChanged = petSnapshotSampled && current.pet.rewardEvents < snapshot.pet.rewardEvents;
+  petSnapshotSampled = true;
+
+  if (petRewardChanged) {
+    const uint32_t foodDelta = snapshot.pet.totalFood >= current.pet.totalFood
+                                   ? snapshot.pet.totalFood - current.pet.totalFood
+                                   : 0;
+    rewardAmount = foodDelta > 0 ? foodDelta : 1;
+    if (rewardAmount > 999U) rewardAmount = 999U;
+    rewardPending = true;
+    rewardUntilMs = 0;
+  }
 
   current = snapshot;
 
@@ -599,6 +747,13 @@ void setSnapshot(const round_ui::Snapshot& snapshot) {
   // latest snapshot and will be shown when setPage() invalidates everything.
   uint8_t changedRegions = 0;
   switch (currentPage) {
+    case round_ui::Page::PetHome:
+      if (petDisplayChanged) changedRegions |= kAllRegions;
+      else if (petAnimationChanged) changedRegions |= petAnimationRegions();
+      break;
+    case round_ui::Page::PetStatus:
+      if (petDisplayChanged) changedRegions |= kAllRegions;
+      break;
     case round_ui::Page::Status:
       if (blockingChanged || portalChanged) changedRegions |= kAllRegions;
       if (countdownChanged || connectedChanged) changedRegions |= 0x0c;
@@ -626,6 +781,29 @@ void setSnapshot(const round_ui::Snapshot& snapshot) {
 }
 
 bool renderOneRegion(uint32_t now) {
+  if (appearanceRevision != pet_appearance::revision()) {
+    appearanceRevision = pet_appearance::revision();
+    activeRegion = -1;
+    activeChanged = false;
+    nextRegion = 0;
+    dirtyRegions = kAllRegions;
+    initialPendingRegions = kAllRegions;
+    pageReadyFlag = false;
+  }
+  if (rewardPending) {
+    rewardPending = false;
+    rewardUntilMs = now + 1800U;
+    if (currentPage == round_ui::Page::PetHome) dirtyRegions |= 0x07;
+  }
+  if (rewardUntilMs != 0 && static_cast<int32_t>(now - rewardUntilMs) >= 0) {
+    rewardUntilMs = 0;
+    rewardAmount = 0;
+    if (currentPage == round_ui::Page::PetHome) dirtyRegions |= 0x07;
+  }
+  if (petReactionUntilMs != 0 && static_cast<int32_t>(now - petReactionUntilMs) >= 0) {
+    petReactionUntilMs = 0;
+    if (currentPage == round_ui::Page::PetHome) dirtyRegions |= petAnimationRegions();
+  }
   // Language changes are intentionally handled by the same bounded stripe
   // renderer as ordinary state changes.  This keeps the selected page and QR
   // modal intact while replacing every visible label without a framebuffer
@@ -696,6 +874,7 @@ namespace round_ui::display {
 bool begin() { return false; }
 void setPage(round_ui::Page) {}
 void setQrView(QrView) {}
+void reactPet(uint32_t) {}
 bool pageReady() { return false; }
 void setSnapshot(const Snapshot&) {}
 bool renderOneRegion(uint32_t) { return false; }

@@ -44,6 +44,9 @@ void setPage(Page page);
 void setQrView(QrView view);
 bool pageReady();
 void setSnapshot(const Snapshot& snapshot);
+// Start a short presentation-only reaction on the pet home screen. It never
+// mutates the pet engine snapshot or awards food.
+void reactPet(uint32_t now);
 // Draw at most one clipped stripe. Returns true when a stripe was drawn.
 bool renderOneRegion(uint32_t now);
 uint32_t maxRenderMicros();

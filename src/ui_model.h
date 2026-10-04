@@ -2,14 +2,18 @@
 
 #include <stdint.h>
 #include "dashboard_link.h"
+#include "pet/PetEngine.h"
 #include "touch_model.h"
 #include "wifi_qr.h"
 
 namespace round_ui {
 
-enum class Page : uint8_t { Status, Activity, Lists, Network, Controls };
+// PetHome is the landing screen. The original appliance pages keep their
+// stable order and controls; PetStatus is a separate detail screen reached by
+// swiping through the same cyclic navigator.
+enum class Page : uint8_t { PetHome, Status, Activity, Lists, Network, Controls, PetStatus };
 enum class QrView : uint8_t { None, Dashboard, SetupWifi };
-constexpr uint8_t kPageCount = 5;
+constexpr uint8_t kPageCount = 7;
 
 inline Page adjacentPage(Page page, int8_t direction) {
   const int16_t index = static_cast<uint8_t>(page);
@@ -36,6 +40,10 @@ struct Snapshot {
   int32_t rssi = 0;
   char ip[16] = {};
   char ap[24] = {};
+  pet::Snapshot pet{};
+  // Updated by the UI cadence rather than by the pet engine. Keeping the
+  // animation clock in the display snapshot caps normal animation at 4 Hz.
+  uint32_t animationTimeMs = 0;
 };
 
 inline bool controlStateChanged(const Snapshot& previous, const Snapshot& next) {
@@ -75,6 +83,12 @@ constexpr ControlRect kPause30Button = {50, 132, 140, 34};
 constexpr ControlRect kResumeButton = {58, 173, 124, 27};
 constexpr ControlRect kDashboardButton = {54, 181, 132, 27};
 constexpr ControlRect kSetupWifiButton = {54, 145, 132, 27};
+constexpr ControlRect kPetBounds = {72, 54, 96, 96};
+
+inline bool petTap(const Gesture& gesture) {
+  return gesture.kind == GestureKind::Tap && kPetBounds.contains(gesture.startX, gesture.startY) &&
+         kPetBounds.contains(gesture.x, gesture.y);
+}
 
 inline Action hitTest(Page page, bool blocking, bool portal, int16_t x, int16_t y) {
   if (page != Page::Controls || portal) return Action::None;
@@ -95,7 +109,7 @@ inline bool setupWifiAvailable(const Snapshot& snapshot) {
 
 class Navigation {
  public:
-  Page page = Page::Status;
+  Page page = Page::PetHome;
   QrView qrView = QrView::None;
 
   void reconcile(const Snapshot& snapshot) {

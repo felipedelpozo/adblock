@@ -38,7 +38,7 @@ jobs:
       - run: pio test -e native
       - run: pio run -e c3 -e round-display -e s3-headless -e jc3636w518c
       - run: python -m unittest discover -s tests -v
-      - run: node --test tests/test_dashboard_*.cjs
+      - run: node --test tests/test_dashboard_*.cjs tests/test_pet_dashboard.cjs
       - run: python tools/package_release.py --version "$ADBLOCK_FW_VERSION"
       - name: Include distribution licenses
         run: |
